@@ -11,7 +11,8 @@ Install these yourself. The app does not download packages or scan the system be
 - Python 3.11 or newer
 - [Wine](https://www.winehq.org/), with `wine`, `wineboot`, `wineserver`, and `winepath` on `PATH`. On Bazzite and other immutable desktops, use the Distrobox setup below.
 - PySide6
-- libarchive, plus the `libarchive-c` Python package, for ISO and 7z files
+- libarchive, plus the `libarchive-c` Python package, for ISO9660 and 7z files
+- 7-Zip (`7zz` or `7z`) for UDF discs and for hybrid discs whose ISO9660 view is missing files. The AppImage includes 7-Zip. A source install needs the `7zip` package on `PATH`.
 
 ZIP files and ordinary copying use the Python standard library.
 
@@ -63,7 +64,7 @@ chmod +x GameVault_Archive_Preparer-*-x86_64.AppImage
 
 If FUSE is unavailable, start it with `--appimage-extract-and-run`.
 
-The AppImage contains the app, its Qt libraries, and libarchive for ISO and 7z reading. It does not contain Wine. Install Wine on the computer, or export it from a Distrobox as described above, so `wine`, `wineboot`, `wineserver`, and `winepath` are on `PATH`.
+The AppImage contains the app, its Qt libraries, libarchive, and 7-Zip. It does not contain Wine. Install Wine on the computer, or export it from a Distrobox as described above, so `wine`, `wineboot`, `wineserver`, and `winepath` are on `PATH`.
 
 Build one locally with:
 

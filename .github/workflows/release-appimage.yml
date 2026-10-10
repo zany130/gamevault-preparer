@@ -28,7 +28,8 @@ jobs:
             curl \
             desktop-file-utils \
             libarchive-dev \
-            libxcb-cursor0
+            libxcb-cursor0 \
+            7zip
 
       - name: Build the AppImage
         run: bash packaging/build-appimage.sh

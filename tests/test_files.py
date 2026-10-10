@@ -8,6 +8,8 @@ from pathlib import Path
 
 from files import (
     FileError,
+    _entries_from_7zip_listing,
+    _image_has_udf,
     apply_copy_plan,
     copy_regular_file,
     create_workspace,
@@ -121,6 +123,170 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(list(dest.iterdir()), [])
 
 
+class IsoTests(unittest.TestCase):
+    def setUp(self):
+        self._saved_7zip = os.environ.get("GVPREP_7ZIP")
+
+    def tearDown(self):
+        if self._saved_7zip is None:
+            os.environ.pop("GVPREP_7ZIP", None)
+        else:
+            os.environ["GVPREP_7ZIP"] = self._saved_7zip
+
+    def _require_genisoimage(self) -> str:
+        tool = shutil_which("genisoimage")
+        if tool is None:
+            self.skipTest("genisoimage is not installed")
+        return tool
+
+    def _make_tree(self, root: Path) -> Path:
+        source = root / "src"
+        source.mkdir()
+        (source / "readme.txt").write_text("hello")
+        (source / "setup.exe").write_bytes(b"MZ")
+        return source
+
+    def _iso9660(self, root: Path) -> Path:
+        source = self._make_tree(root)
+        image = root / "game.iso"
+        subprocess_run(
+            [self._require_genisoimage(), "-o", str(image), "-R", "-J", str(source)],
+        )
+        return image
+
+    def _udf(self, root: Path) -> Path:
+        source = self._make_tree(root)
+        image = root / "game.iso"
+        subprocess_run(
+            [self._require_genisoimage(), "-o", str(image), "-udf", str(source)],
+        )
+        return image
+
+    def test_iso9660_extracts_without_7zip(self):
+        os.environ["GVPREP_7ZIP"] = ""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = self._iso9660(root)
+            self.assertFalse(_image_has_udf(image))
+            before = image.read_bytes()
+            dest = root / "stage"
+            dest.mkdir()
+            extract_archive(image, dest, kind="iso")
+            self.assertEqual((dest / "readme.txt").read_text(), "hello")
+            self.assertEqual((dest / "setup.exe").read_bytes(), b"MZ")
+            self.assertEqual(image.read_bytes(), before)
+            self.assertFalse((dest / "setup.exe").stat().st_mode & 0o111)
+
+    def test_rock_ridge_symlink_is_rejected(self):
+        os.environ["GVPREP_7ZIP"] = ""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = self._make_tree(root)
+            os.symlink("readme.txt", source / "link.txt")
+            image = root / "linked.iso"
+            subprocess_run(
+                [self._require_genisoimage(), "-o", str(image), "-R", str(source)],
+            )
+            dest = root / "stage"
+            dest.mkdir()
+            with self.assertRaises(FileError) as caught:
+                extract_archive(image, dest, kind="iso")
+            self.assertIn("link", str(caught.exception).lower())
+            self.assertEqual(list(dest.iterdir()), [])
+
+    def test_udf_hybrid_uses_7zip_names_not_the_iso9660_view(self):
+        if shutil_which("7z") is None and shutil_which("7zz") is None:
+            self.skipTest("7-Zip is not installed")
+        os.environ.pop("GVPREP_7ZIP", None)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = self._udf(root)
+            self.assertTrue(_image_has_udf(image))
+            before = image.stat().st_mtime_ns
+            dest = root / "stage"
+            dest.mkdir()
+            extract_archive(image, dest, kind="iso")
+            self.assertEqual((dest / "readme.txt").read_text(), "hello")
+            self.assertEqual((dest / "setup.exe").read_bytes(), b"MZ")
+            self.assertFalse((dest / "README.TXT").exists())
+            self.assertEqual(image.stat().st_mtime_ns, before)
+
+    def test_udf_reports_a_missing_7zip(self):
+        os.environ["GVPREP_7ZIP"] = ""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = self._udf(root)
+            dest = root / "stage"
+            dest.mkdir()
+            with self.assertRaises(FileError) as caught:
+                extract_archive(image, dest, kind="iso")
+            self.assertIn("7-Zip", str(caught.exception))
+            self.assertEqual(list(dest.iterdir()), [])
+
+    def test_failed_7zip_extract_removes_the_workspace(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = self._udf(root)
+            before = image.read_bytes()
+            tool = root / "failing-7z"
+            tool.write_text("#!/bin/sh\necho boom from 7zip >&2\nexit 2\n", encoding="utf-8")
+            tool.chmod(0o755)
+            os.environ["GVPREP_7ZIP"] = str(tool)
+            dest = root / "stage"
+            dest.mkdir()
+            with self.assertRaises(FileError) as caught:
+                extract_archive(image, dest, kind="iso")
+            self.assertIn("boom from 7zip", str(caught.exception))
+            self.assertEqual(list(dest.iterdir()), [])
+            disc = root / "disc"
+            disc.mkdir()
+            placed = disc / "game.iso"
+            image.replace(placed)
+            scratch = root / "scratch"
+            output = root / "out"
+            with self.assertRaises(FileError) as staged:
+                stage_media("iso", placed, scratch, output)
+            self.assertIn("boom from 7zip", str(staged.exception))
+            self.assertFalse(any(scratch.glob("gvprep-*")))
+            self.assertEqual(placed.read_bytes(), before)
+
+    def test_7zip_listing_rejects_unsafe_entries(self):
+        samples = [
+            "Path = ../outside.txt\nFolder = -\nSize = 1\n",
+            "Path = dir/link.txt\nAttributes = A lrwxrwxrwx\nSize = 4\n",
+            "Path = dir/fifo\nAttributes = A prw-r--r--\nSize = 0\n",
+            "Path = readme.txt\nFolder = -\nSize = 1\n\nPath = readme.txt\nFolder = -\nSize = 2\n",
+        ]
+        for listing in samples:
+            with self.subTest(listing=listing.splitlines()[0]):
+                with self.assertRaises(FileError):
+                    _entries_from_7zip_listing(listing)
+
+    def test_udf_marker_in_a_hybrid_header_is_detected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            image = Path(raw) / "hybrid.iso"
+            blob = bytearray(22 * 2048)
+            blob[16 * 2048 + 1 : 16 * 2048 + 6] = b"CD001"
+            blob[20 * 2048 + 1 : 20 * 2048 + 6] = b"NSR02"
+            image.write_bytes(blob)
+            self.assertTrue(_image_has_udf(image))
+            plain = Path(raw) / "plain.iso"
+            plain_blob = bytearray(22 * 2048)
+            plain_blob[16 * 2048 + 1 : 16 * 2048 + 6] = b"CD001"
+            plain.write_bytes(plain_blob)
+            self.assertFalse(_image_has_udf(plain))
+
+
+def shutil_which(name: str) -> str | None:
+    return __import__("shutil").which(name)
+
+
+def subprocess_run(args: list[str]) -> None:
+    completed = __import__("subprocess").run(args, capture_output=True, check=False)
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr.decode("utf-8", "replace"))
+
+
 class CopyTests(unittest.TestCase):
     def test_copying_an_exe_does_not_run_it(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -203,7 +369,10 @@ class CopyTests(unittest.TestCase):
 
     def test_modules_do_not_execute_programs(self):
         root = Path(__file__).resolve().parents[1]
-        for name in ("files.py", "packaging.py", "fixes.py"):
+        files_source = (root / "files.py").read_text(encoding="utf-8")
+        self.assertNotIn("shell=True", files_source)
+        self.assertNotIn("shell = True", files_source)
+        for name in ("packaging.py", "fixes.py"):
             tree = ast.parse((root / name).read_text(encoding="utf-8"))
             modules = []
             for node in ast.walk(tree):

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build a GameVault Archive Preparer AppImage.
-# Wine is not included. libarchive.so.13 is copied in for ISO and 7z reading.
+# Wine is not included. libarchive.so.13 is copied in for ISO9660 and 7z
+# archives. A 7zz or 7z binary is copied in for UDF and hybrid discs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -125,6 +126,20 @@ if [[ ! -e "$INTERNAL/libarchive.so.13" ]]; then
 fi
 BUNDLED_LIBS["libarchive.so.13"]=1
 bundle_dependencies "$INTERNAL/libarchive.so.13"
+
+SEVENZIP=""
+for candidate in 7zz 7z; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        SEVENZIP="$(command -v "$candidate")"
+        break
+    fi
+done
+if [[ -z "$SEVENZIP" ]]; then
+    echo "Install 7zip (the 7zz or 7z command) so the AppImage can stage UDF discs." >&2
+    exit 1
+fi
+cp -L "$SEVENZIP" "$INTERNAL/$(basename "$SEVENZIP")"
+chmod 0755 "$INTERNAL/$(basename "$SEVENZIP")"
 
 # Qt's xcb plugin asks for this at startup. Shipping it avoids a host package.
 if [[ ! -e "$INTERNAL/libxcb-cursor.so.0" ]] && ldconfig -p | awk '$1 == "libxcb-cursor.so.0" { found = 1 } END { exit !found }'; then

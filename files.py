@@ -1,15 +1,24 @@
-"""Copying, archive reading, and path checks. Nothing in this module executes files."""
+"""Copying, archive reading, and path checks.
+
+The only program this module runs is 7-Zip, for UDF and hybrid disc images.
+It never runs files from an archive or the original installer.
+"""
 
 from __future__ import annotations
 
 import errno
 import os
+import re
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from wine import host_tool_environment
 
 MARKER = ".gamevault-preparer"
 BROAD_GAME_ROOTS = {
@@ -629,6 +638,221 @@ def _extract_libarchive(archive: Path, dest: Path, progress) -> None:
         raise FileError("The archive changed while it was being read.")
 
 
+_UDF_IDENTIFIERS = (b"NSR01", b"NSR02", b"NSR03")
+_UNIX_MODE = re.compile(r"^[dlpcb-][rwxstST-]{9}$")
+
+
+def _image_has_udf(archive: Path) -> bool:
+    """True when a UDF volume descriptor is present, including ISO/UDF hybrids."""
+    try:
+        with archive.open("rb") as handle:
+            for sector in range(257):
+                handle.seek(sector * 2048 + 1)
+                identifier = handle.read(5)
+                if len(identifier) < 5:
+                    return False
+                if identifier in _UDF_IDENTIFIERS:
+                    return True
+    except OSError as exc:
+        raise explain_os_error(exc, "Reading the disc image", archive) from exc
+    return False
+
+
+def _missing_7zip_message() -> str:
+    return (
+        "This disc image needs 7-Zip (7zz or 7z) to read its UDF filesystem. "
+        "Install the 7zip package and make sure that command is on PATH. "
+        "The AppImage includes 7-Zip."
+    )
+
+
+def _find_7zip() -> Path:
+    override = os.environ.get("GVPREP_7ZIP")
+    if override is not None:
+        if override == "":
+            raise FileError(_missing_7zip_message())
+        chosen = Path(override)
+        if chosen.is_file() and os.access(chosen, os.X_OK):
+            return chosen
+        raise FileError(f"7-Zip was not found at {override}. {_missing_7zip_message()}")
+    search: list[Path] = []
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        search.append(Path(bundled))
+    search.append(Path(sys.executable).resolve().parent / "_internal")
+    for directory in search:
+        for name in ("7zz", "7z"):
+            candidate = directory / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+    for name in ("7zz", "7z"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    raise FileError(_missing_7zip_message())
+
+
+def _run_7zip(program: Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            [os.fspath(program), *args],
+            env=host_tool_environment(),
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise FileError(f"Could not start 7-Zip ({program}). {exc}") from exc
+
+
+def _tool_text(completed: subprocess.CompletedProcess[bytes]) -> str:
+    parts = [
+        completed.stdout.decode("utf-8", "replace").strip(),
+        completed.stderr.decode("utf-8", "replace").strip(),
+    ]
+    text = "\n".join(part for part in parts if part)
+    if len(text) > 700:
+        return text[-700:]
+    return text
+
+
+def _unix_type(attributes: str) -> str | None:
+    for token in attributes.split():
+        if _UNIX_MODE.match(token):
+            return token[0]
+    return None
+
+
+def _listed_kind(fields: dict[str, str], raw_path: str) -> str:
+    unix = _unix_type(fields.get("Attributes", ""))
+    if unix == "l":
+        return "link"
+    if unix in {"p", "c", "b", "s"}:
+        return "special"
+    folder = fields.get("Folder")
+    if unix == "d" or folder == "+":
+        return "dir"
+    if unix == "-" or folder == "-":
+        return "file"
+    if fields.get("Attributes", "").startswith("D"):
+        return "dir"
+    raise FileError(f"This archive entry type is not supported: {raw_path}")
+
+
+def _entries_from_7zip_listing(text: str) -> list[tuple[str, bool, int | None]]:
+    entries: list[tuple[str, bool, int | None]] = []
+    fields: dict[str, str] = {}
+
+    def flush() -> None:
+        if "Path" not in fields:
+            fields.clear()
+            return
+        raw = fields["Path"]
+        relative = safe_archive_path(raw)
+        if not relative:
+            fields.clear()
+            return
+        if fields.get("Encrypted") == "+":
+            raise FileError(f"Encrypted archive entries are not supported: {raw}")
+        kind = _listed_kind(fields, raw)
+        if kind in {"link", "special"}:
+            raise FileError(f"Refusing to extract a link or special file: {raw}")
+        size: int | None = None
+        if kind == "file" and fields.get("Size", "").isdigit():
+            size = int(fields["Size"])
+        entries.append((relative, kind == "dir", size))
+        fields.clear()
+
+    for line in text.splitlines():
+        if not line.strip():
+            flush()
+            continue
+        if " = " not in line:
+            continue
+        key, value = line.split(" = ", 1)
+        fields[key] = value
+    flush()
+    _assert_entry_set([(relative, None, is_dir) for relative, is_dir, _size in entries])
+    return entries
+
+
+def _audit_7zip_tree(dest: Path, entries: list[tuple[str, bool, int | None]]) -> None:
+    expected = {relative: (is_dir, size) for relative, is_dir, size in entries}
+    for relative, is_dir, _size in entries:
+        if is_dir:
+            continue
+        parent_parts: list[str] = []
+        for part in relative.split("/")[:-1]:
+            parent_parts.append(part)
+            parent = "/".join(parent_parts)
+            expected.setdefault(parent, (True, None))
+    found: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(dest, followlinks=False):
+        current = Path(dirpath)
+        for name in dirnames + filenames:
+            path = current / name
+            relative = path.relative_to(dest).as_posix()
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise FileError(f"Refusing to keep a link extracted from the disc: {relative}")
+            if stat.S_ISDIR(info.st_mode):
+                is_dir = True
+            elif stat.S_ISREG(info.st_mode):
+                is_dir = False
+            else:
+                raise FileError(f"Refusing to keep a special file extracted from the disc: {relative}")
+            if relative not in expected or expected[relative][0] != is_dir:
+                raise FileError(f"7-Zip wrote an unexpected entry: {relative}")
+            size = expected[relative][1]
+            if not is_dir and size is not None and info.st_size != size:
+                raise FileError(
+                    f"Extracted file size does not match the disc listing: {relative}"
+                )
+            found.add(relative)
+    missing = [relative for relative in expected if relative not in found]
+    if missing:
+        raise FileError(f"7-Zip did not extract every listed file. Missing: {missing[0]}")
+
+
+def _extract_with_7zip(archive: Path, dest: Path, progress) -> None:
+    program = _find_7zip()
+    _report(progress, 0, 1, "Reading the disc with 7-Zip")
+    listed = _run_7zip(program, ["l", "-slt", "-ba", os.fspath(archive)])
+    if listed.returncode not in (0, 1):
+        detail = _tool_text(listed)
+        raise FileError(f"7-Zip could not read {archive.name}. {detail}".rstrip())
+    entries = _entries_from_7zip_listing(listed.stdout.decode("utf-8", "replace"))
+    if not any(not is_dir for _relative, is_dir, _size in entries):
+        raise FileError(f"The archive has no files: {archive.name}")
+    _report(progress, 0, 1, "Extracting the disc with 7-Zip")
+    extracted = _run_7zip(program, ["x", "-y", f"-o{dest}", os.fspath(archive)])
+    if extracted.returncode not in (0, 1):
+        detail = _tool_text(extracted)
+        raise FileError(f"7-Zip could not extract {archive.name}. {detail}".rstrip())
+    _audit_7zip_tree(dest, entries)
+    _report(progress, 1, 1, "Disc extracted")
+
+
+def _extract_iso(archive: Path, dest: Path, progress) -> None:
+    """Read UDF and hybrid images with 7-Zip. Keep ISO9660 on libarchive."""
+    if _image_has_udf(archive):
+        _extract_with_7zip(archive, dest, progress)
+        return
+    try:
+        manifest = _libarchive_manifest(archive)
+    except FileError as exc:
+        if not str(exc).startswith("Cannot read this archive"):
+            raise
+        try:
+            _extract_with_7zip(archive, dest, progress)
+        except FileError as fallback_exc:
+            raise FileError(f"{exc} {fallback_exc}") from fallback_exc
+        return
+    if not any(not is_dir for _relative, is_dir in manifest):
+        _extract_with_7zip(archive, dest, progress)
+        return
+    _extract_libarchive(archive, dest, progress)
+
+
 def extract_archive(archive: Path, dest: Path, *, kind: str, progress=None) -> None:
     archive = archive.resolve()
     dest = dest.resolve()
@@ -643,6 +867,8 @@ def extract_archive(archive: Path, dest: Path, *, kind: str, progress=None) -> N
             _extract_zip(archive, dest, progress)
         elif kind == "libarchive":
             _extract_libarchive(archive, dest, progress)
+        elif kind == "iso":
+            _extract_iso(archive, dest, progress)
         else:
             raise FileError(f"Unsupported archive type: {kind}")
     except Exception:
@@ -789,7 +1015,7 @@ def stage_media(
         media = workspace / "media"
         if kind == "iso":
             _report(progress, 0, 1, "Extracting the ISO")
-            extract_archive(source, media, kind="libarchive", progress=progress)
+            extract_archive(source, media, kind="iso", progress=progress)
         else:
             copy_tree_contents(copied_root, media, progress)
         installer = None
