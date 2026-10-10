@@ -9,7 +9,7 @@ A finished ZIP is not a promise that the game will run. It does not include the 
 Install these yourself. The app does not download packages or scan the system beyond starting a command and reporting when it is missing.
 
 - Python 3.11 or newer
-- [Wine](https://www.winehq.org/), with `wine`, `wineboot`, `wineserver`, and `winepath` on `PATH`
+- [Wine](https://www.winehq.org/), with `wine`, `wineboot`, `wineserver`, and `winepath` on `PATH`. On Bazzite and other immutable desktops, use the Distrobox setup below.
 - PySide6
 - libarchive, plus the `libarchive-c` Python package, for ISO and 7z files
 
@@ -23,6 +23,35 @@ python3 -m venv --system-site-packages .venv
 
 Scratch files go in `~/.cache/gamevault-preparer` (or `$XDG_CACHE_HOME/gamevault-preparer`). Archives go in `~/GameVault`. Change either path in the window before staging.
 
+## Wine on Bazzite and other immutable desktops
+
+Bazzite does not put Wine on the host `PATH`. Steam's Proton is a separate runtime, and this app does not call it. Create a Distrobox, install Wine there, and export the four commands the app looks up. Distrobox is already installed on Bazzite. The exported commands are wrappers: Wine and its libraries stay in the container, and the installer window still opens on your desktop.
+
+```bash
+distrobox create --name gamevault-wine --image fedora:latest
+distrobox enter gamevault-wine
+```
+
+Inside the container, install Wine, including 32-bit support for older installers, and export the commands into the home directory that the host and the container share:
+
+```bash
+sudo dnf install -y wine wine.i686
+mkdir -p "${HOME}/.local/bin"
+for cmd in wine wineboot wineserver winepath; do
+  distrobox-export --bin "/usr/bin/${cmd}" --export-path "${HOME}/.local/bin"
+done
+exit
+```
+
+Log out and back in if a new terminal does not see `~/.local/bin`. Then confirm all four commands are the exported wrappers:
+
+```bash
+command -v wine wineboot wineserver winepath
+wine --version
+```
+
+Each path should be under `~/.local/bin`. Leave the scratch and output folders in your home directory. The window defaults already do that, and that home directory is the one the container can see.
+
 ## AppImage
 
 Published GitHub releases include an AppImage. The workflow `.github/workflows/release-appimage.yml` builds it when a release is published. You can also run that workflow by hand; the file is saved as a workflow artifact and, on a release, attached to the release.
@@ -34,7 +63,7 @@ chmod +x GameVault_Archive_Preparer-*-x86_64.AppImage
 
 If FUSE is unavailable, start it with `--appimage-extract-and-run`.
 
-The AppImage contains the app, its Qt libraries, and libarchive for ISO and 7z reading. It does not contain Wine. Install Wine on the computer so `wine`, `wineboot`, `wineserver`, and `winepath` are on `PATH`.
+The AppImage contains the app, its Qt libraries, and libarchive for ISO and 7z reading. It does not contain Wine. Install Wine on the computer, or export it from a Distrobox as described above, so `wine`, `wineboot`, `wineserver`, and `winepath` are on `PATH`.
 
 Build one locally with:
 
