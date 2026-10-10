@@ -1119,6 +1119,25 @@ def child_directories(root: Path) -> list[str]:
     return names
 
 
+def find_patcher_programs(root: Path) -> list[str]:
+    """Relative paths of real .exe and .bat files. Links are skipped and not followed."""
+    root = root.resolve()
+    if root.is_symlink() or not root.is_dir():
+        raise FileError(f"Not a directory: {root}")
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
+        dirnames[:] = sorted(name for name in dirnames if not (base / name).is_symlink())
+        for name in sorted(filenames):
+            path = base / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix.lower() not in {".exe", ".bat"}:
+                continue
+            found.append(path.relative_to(root).as_posix())
+    return found
+
+
 def stage_patcher_bundle(executable: Path, dest: Path, progress=None) -> Path:
     executable = executable.resolve()
     if executable.is_symlink() or not executable.is_file():

@@ -15,13 +15,19 @@ from files import (
     create_workspace,
     delete_workspace,
     extract_archive,
+    find_patcher_programs,
     plan_loose_files,
     plan_tree,
     safe_archive_path,
     stage_media,
     validate_game_folder,
 )
-from fixes import Fix
+from fixes import (
+    Fix,
+    fixes_for_archive_choice,
+    patcher_launch_target,
+    placed_patcher_copy_plan,
+)
 
 
 class PathTests(unittest.TestCase):
@@ -451,6 +457,107 @@ class StageTests(unittest.TestCase):
             empty.mkdir()
             with self.assertRaises(FileError):
                 validate_game_folder(empty, prefix)
+
+
+class PatcherFixTests(unittest.TestCase):
+    def test_scan_finds_only_real_executables(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            tree = root / "archive"
+            nested = tree / "tools"
+            nested.mkdir(parents=True)
+            (tree / "Patch.exe").write_bytes(b"MZ")
+            (tree / "readme.txt").write_text("notes")
+            (nested / "setup.BAT").write_text("echo hi")
+            (tree / "linked.exe").symlink_to(tree / "Patch.exe")
+            outside = root / "hidden"
+            outside.mkdir()
+            (outside / "secret.exe").write_bytes(b"MZ")
+            (tree / "elsewhere").symlink_to(outside)
+            self.assertEqual(
+                find_patcher_programs(tree),
+                ["Patch.exe", "tools/setup.BAT"],
+            )
+
+    def test_placed_patcher_is_planned_into_the_game_root(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            staged = root / "staged"
+            staged.mkdir()
+            (staged / "Patch.exe").write_bytes(b"MZ")
+            (staged / "data.bin").write_bytes(b"bin")
+            game = root / "game"
+            game.mkdir()
+            (game / "data.bin").write_bytes(b"old")
+            fix = Fix(
+                "patcher",
+                "Copy Patch.exe into the game folder, then run it",
+                source_root=staged,
+                executable=Path("Patch.exe"),
+                place_in_game=True,
+            )
+            plan = placed_patcher_copy_plan(fix, game)
+            self.assertEqual(plan.new_files, ["Patch.exe"])
+            self.assertEqual(plan.overwrites, ["data.bin"])
+            self.assertNotIn("staged", [item.relative for item in plan.files])
+
+    def test_launch_path_is_under_the_game_folder(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            game = root / "My Game"
+            (game / "tools").mkdir(parents=True)
+            (game / "tools" / "Patch.exe").write_bytes(b"MZ")
+            fix = Fix(
+                "patcher",
+                "Run tools/Patch.exe from the game folder",
+                executable=Path("tools/Patch.exe"),
+                place_in_game=True,
+            )
+            executable, cwd = patcher_launch_target(fix, game)
+            self.assertEqual(executable, (game / "tools" / "Patch.exe").resolve())
+            self.assertEqual(cwd, game.resolve())
+            missing = Fix(
+                "patcher",
+                "Run Missing.exe from the game folder",
+                executable=Path("Missing.exe"),
+                place_in_game=True,
+            )
+            with self.assertRaises(FileError) as caught:
+                patcher_launch_target(missing, game)
+            self.assertIn("not in the game folder yet", str(caught.exception))
+            with self.assertRaises(FileError):
+                patcher_launch_target(
+                    Fix("patcher", "bad", executable=Path("../outside.exe"), place_in_game=True),
+                    game,
+                )
+
+    def test_own_folder_patcher_stays_outside_the_game(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            folder = root / "patch files"
+            folder.mkdir()
+            staged = folder / "Patch.exe"
+            staged.write_bytes(b"MZ")
+            game = root / "game"
+            game.mkdir()
+            executable, cwd = patcher_launch_target(
+                Fix("patcher", "Run Patch.exe from its own folder", executable=staged),
+                game,
+            )
+            self.assertEqual(executable, staged.resolve())
+            self.assertEqual(cwd, folder.resolve())
+            self.assertFalse((game / "Patch.exe").exists())
+
+    def test_copy_only_does_not_add_a_run_step(self):
+        copy = Fix("copy", "Copy contents of fix.zip", source_root=Path("/tmp/staged"))
+        self.assertEqual(fixes_for_archive_choice(copy, None), [copy])
+        self.assertEqual(fixes_for_archive_choice(copy, ""), [copy])
+        rows = fixes_for_archive_choice(copy, "tools/Patch.exe")
+        self.assertEqual([row.kind for row in rows], ["copy", "patcher"])
+        self.assertTrue(rows[1].place_in_game)
+        self.assertIsNone(rows[1].source_root)
+        self.assertEqual(rows[1].executable, Path("tools/Patch.exe"))
+        self.assertIn("tools/Patch.exe", rows[1].label)
 
 
 class FixOrderTests(unittest.TestCase):

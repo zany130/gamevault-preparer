@@ -79,7 +79,7 @@ The file is written to `dist/`. The build uses the Python on your `PATH`, so a r
 1. Choose an installer EXE, an installer folder, or an ISO. Set **Source folder** to the directory that holds those files, such as `roms/pc`. **Select source** opens there, and the app remembers that folder. The window shows the folder that will be copied. Staging copies or extracts into a new workspace and leaves the original alone.
 2. Launch the installer in a new prefix. The installer's default location is fine. Finish the installer, uncheck Launch game if it is offered, then click **Installation finished**.
 3. Select the installed game folder inside that prefix's `drive_c`.
-4. Optionally add copy fixes or EXE/BAT patchers. **Apply All Fixes** runs the enabled rows in order. New files are copied without another prompt. Overwrites wait for approval. Each patcher waits for a separate **Run** confirmation, then for **Patcher finished**.
+4. Optionally add copy fixes or EXE/BAT patchers. A patcher can be copied into the game folder and run there, or run from its own folder. **Apply All Fixes** runs the enabled rows in order. New files are copied without another prompt. Overwrites wait for approval. Each patcher waits for a separate **Run** confirmation, then for **Patcher finished**. If a ZIP or 7z contains an EXE or BAT, you can copy the files only, or also run one of those programs from the game folder after the copy. Files copied into the game stay there; delete leftovers from Manual adjustments if they should not be in the ZIP.
 5. Optionally open the game folder or the Wine prefix in your file manager and edit files yourself. The app does not inspect those edits. Click **Continue** when you want to package the game folder. You can continue without opening either folder.
 6. Enter a title and, if you want, a version and a four-digit year. Create the ZIP.
 
@@ -111,6 +111,6 @@ PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -v
 5. Repeat with an existing ZIP of the same name and confirm that file is unchanged.
 6. Stage an installer folder, then an ISO, and reach a ZIP from each.
 7. Add a copy fix that only adds files and confirm **Apply All Fixes** does not ask again. Add one that overwrites, decline it, and confirm older applied fixes are still there.
-8. Add an EXE or BAT patcher with a space in its folder name. Confirm the queue stops until you click **Run**, then continues only after **Patcher finished**.
-9. Copy an EXE with **Add files or archive** and confirm it is not launched.
+8. Add an EXE or BAT patcher with a space in its folder name. Choose **Copy into the game folder, then run it there**. Confirm the queue shows which files would be replaced when that matters, stops until you click **Run**, then continues only after **Patcher finished**. Repeat with **Run it from its own folder** and confirm nothing is copied into the game.
+9. Add a ZIP that contains an EXE. Choose **Copy the files only** and confirm it is not launched. Add it again, choose the program, and confirm a run row is added after the copy and is not launched until you click **Run**.
 10. Close the window once with **Keep workspace** and once, on a disposable run, with **Delete workspace**.

@@ -36,6 +36,7 @@ from files import (
     archive_kind_for_fix,
     child_directories,
     extract_archive,
+    find_patcher_programs,
     format_listing,
     installer_inside,
     remove_owned_directory,
@@ -45,7 +46,14 @@ from files import (
     delete_workspace,
     apply_copy_plan,
 )
-from fixes import Fix, plan_for_fix, preview_text
+from fixes import (
+    Fix,
+    fixes_for_archive_choice,
+    patcher_launch_target,
+    placed_patcher_copy_plan,
+    plan_for_fix,
+    preview_text,
+)
 from packaging import ArchiveNameError, build_archive_name, create_game_zip
 from wine import (
     WineError,
@@ -293,8 +301,11 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Fixes")
         layout = QVBoxLayout(box)
         hint = QLabel(
-            "Copy fixes can add or replace files. A patcher runs only after you confirm it, "
-            "because it cannot show an overwrite preview. Skip any row you do not want."
+            "Copy fixes can add or replace files. A patcher copied into the game folder "
+            "shows which files it would replace, then runs only after you confirm it. "
+            "A patcher run from its own folder has no file preview and also waits for confirmation. "
+            "If a ZIP or 7z contains a program, you can copy the files only, or run that program "
+            "from the game folder after the copy. Skip any row you do not want."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -1145,10 +1156,12 @@ class MainWindow(QMainWindow):
         def work(progress):
             progress(40, "Checking files")
             plan = plan_for_fix(fix, game)
+            programs = find_patcher_programs(source) if staging is not None else []
             progress(100, "Ready")
-            return plan
+            return plan, programs
 
-        def done(plan):
+        def done(result):
+            plan, programs = result
             dialog = TextDialog("Files that will be copied", preview_text(plan), "Add fix", "Cancel", self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 if staging is not None:
@@ -1156,7 +1169,27 @@ class MainWindow(QMainWindow):
                 self.set_status("The copy fix was not added.")
                 self._start_next_archive()
                 return
-            self._append_fix(fix)
+            program = None
+            if programs:
+                chooser = ChoiceDialog(
+                    "Program in this archive",
+                    "This archive contains a program. Copy the files only, or copy them and then "
+                    "run one program from the game folder after the copy.\n\n"
+                    "A wrapper folder keeps the program in a subfolder. To put it next to the game "
+                    "executable, cancel and choose the folder inside the archive that actually contains "
+                    "the patcher.",
+                    [("", "Copy the files only"), *[(item, item) for item in programs]],
+                    self,
+                )
+                if chooser.exec() != QDialog.DialogCode.Accepted:
+                    if staging is not None:
+                        self._discard_staging(staging)
+                    self.set_status("The copy fix was not added.")
+                    self._start_next_archive()
+                    return
+                program = chooser.selected or None
+            for row in fixes_for_archive_choice(fix, program):
+                self._append_fix(row)
             self._start_next_archive()
 
         self._start_worker(work, done, cleanup=staging)
@@ -1180,22 +1213,31 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         staging = self._new_fix_dir("patcher")
-        workdir = dialog.workdir
+        place_in_game = dialog.place_in_game
         self.set_status(f"Staging files next to {executable.name}.")
 
         def work(progress):
             return stage_patcher_bundle(executable, staging, progress)
 
         def done(staged: Path):
-            where = "game folder" if workdir == "game" else "patcher folder"
-            self._append_fix(
-                Fix(
-                    "patcher",
-                    f"Run patcher {staged.name} (working directory: {where})",
-                    executable=staged,
-                    workdir_kind=workdir,
+            if place_in_game:
+                self._append_fix(
+                    Fix(
+                        "patcher",
+                        f"Copy {staged.name} into the game folder, then run it",
+                        source_root=staging,
+                        executable=staged.relative_to(staging),
+                        place_in_game=True,
+                    )
                 )
-            )
+            else:
+                self._append_fix(
+                    Fix(
+                        "patcher",
+                        f"Run {staged.name} from its own folder",
+                        executable=staged,
+                    )
+                )
 
         self._start_worker(work, done, cleanup=staging)
 
@@ -1241,7 +1283,9 @@ class MainWindow(QMainWindow):
             self.refresh_buttons()
             return
         fix = self.fixes[self._fix_queue[self._fix_pos]]
-        if fix.kind == "patcher":
+        if fix.kind == "patcher" and fix.place_in_game and fix.source_root is not None:
+            self._preview_placed_patcher(fix)
+        elif fix.kind == "patcher":
             self._confirm_patcher(fix)
         else:
             self._preview_fix(fix)
@@ -1258,6 +1302,16 @@ class MainWindow(QMainWindow):
     def _after_preview(self, fix: Fix, plan) -> None:
         if not self._fix_queue_active:
             return
+        if not self._accept_overwrites(fix, plan):
+            return
+        game = self.game_dir
+
+        def work(progress):
+            apply_copy_plan(plan, game, progress)
+
+        self._start_worker(work, lambda _result: self._complete_current_fix())
+
+    def _accept_overwrites(self, fix: Fix, plan) -> bool:
         if plan.overwrites:
             shown = "\n".join(plan.overwrites[:40])
             extra = len(plan.overwrites) - 40
@@ -1277,47 +1331,94 @@ class MainWindow(QMainWindow):
                     "Stopped before a fix that would overwrite files. Earlier applied fixes remain."
                 )
                 self.refresh_buttons()
-                return
+                return False
         else:
             self.log(f"{fix.label}: copying {len(plan.new_files)} new file(s).")
+        return True
+
+    def _preview_placed_patcher(self, fix: Fix) -> None:
+        game = self.game_dir
+
+        def work(progress):
+            progress(30, fix.label)
+            return placed_patcher_copy_plan(fix, game)
+
+        self._start_worker(work, lambda plan: self._after_placed_preview(fix, plan))
+
+    def _after_placed_preview(self, fix: Fix, plan) -> None:
+        if not self._fix_queue_active:
+            return
+        if not self._accept_overwrites(fix, plan):
+            return
+        if not self._ask_run_patcher(fix):
+            return
         game = self.game_dir
 
         def work(progress):
             apply_copy_plan(plan, game, progress)
 
-        self._start_worker(work, lambda _result: self._complete_current_fix())
+        self._start_worker(work, lambda _result: self._launch_patcher(fix))
 
-    def _confirm_patcher(self, fix: Fix) -> None:
+    def _patcher_confirm_text(self, fix: Fix) -> str:
+        if fix.place_in_game and fix.source_root is not None:
+            detail = (
+                "This copies the patcher into the game folder, then runs it there. "
+                "Those files stay in the game folder. Delete leftovers from Manual adjustments "
+                "before creating the ZIP if they should not be packaged.\n\n"
+                "The patcher may also modify the Wine prefix. "
+                "Apply All Fixes does not run it until you confirm it here."
+            )
+        elif fix.place_in_game:
+            detail = (
+                "This runs a program that was copied into the game folder. "
+                "It does not copy those files again, and it may modify the Wine prefix. "
+                "Apply All Fixes does not run it until you confirm it here."
+            )
+        else:
+            detail = (
+                "This patcher runs from its own folder. Nothing is copied into the game. "
+                "It may modify the Wine prefix. "
+                "Apply All Fixes does not run it until you confirm it here."
+            )
+        return f"{fix.label}\n\n{detail}\n\nRun it now? Stop leaves this fix unstarted."
+
+    def _ask_run_patcher(self, fix: Fix) -> bool:
         dialog = TextDialog(
             "Run patcher",
-            f"{fix.label}\n\n"
-            "This patcher cannot show an overwrite preview and may modify the Wine prefix. "
-            "Apply All Fixes does not run it until you confirm it here.\n\n"
-            "Run it now? Stop leaves this fix unstarted.",
+            self._patcher_confirm_text(fix),
             "Run",
             "Stop",
             self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            self._fix_queue_active = False
-            self.set_status("Stopped before running a patcher. Earlier applied fixes remain.")
-            self.refresh_buttons()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return True
+        self._fix_queue_active = False
+        self.set_status("Stopped before running a patcher. Earlier applied fixes remain.")
+        self.refresh_buttons()
+        return False
+
+    def _confirm_patcher(self, fix: Fix) -> None:
+        if not self._ask_run_patcher(fix):
             return
         self._launch_patcher(fix)
 
     def _launch_patcher(self, fix: Fix) -> None:
-        if fix.executable is None or self.game_dir is None:
+        if self.game_dir is None:
             self._fail_queue("The patcher file is missing.")
             return
-        cwd = self.game_dir if fix.workdir_kind == "game" else fix.executable.parent
+        try:
+            executable, cwd = patcher_launch_target(fix, self.game_dir)
+        except FileError as exc:
+            self._fail_queue(str(exc))
+            return
         self._patcher_cwd = cwd
         self._stopped = False
         self._stop_settled = False
-        if fix.executable.suffix.lower() == ".bat":
+        if executable.suffix.lower() == ".bat":
             self.set_status("Converting the batch path with winepath.")
             self._run_prefix_command(
                 "winepath",
-                ["-w", str(fix.executable)],
+                ["-w", str(executable)],
                 cwd,
                 self._winepath_finished,
                 "waiting-processes",
@@ -1326,7 +1427,7 @@ class MainWindow(QMainWindow):
             self.set_status("Finish the patcher, then click Patcher finished.")
             self._run_prefix_command(
                 "wine",
-                [str(fix.executable)],
+                [str(executable)],
                 cwd,
                 self._patcher_exited,
                 "patcher-ui",
@@ -1684,20 +1785,26 @@ class PatcherDialog(QDialog):
     def __init__(self, folder: Path, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add a patcher")
-        self.workdir = "game"
+        self.place_in_game = True
         layout = QVBoxLayout(self)
         text = QLabel(
-            "This copies the patcher's folder, including companion files, into the workspace:\n"
+            "The patcher's folder, including companion files, is copied into the workspace:\n"
             f"{folder}\n\n"
-            "Choose the working directory. You will be asked again before the patcher runs."
+            "Copy into the game folder, then run it there: the patcher and its files land next to "
+            "the game. You will see which files would be replaced before anything is overwritten. "
+            "Those files stay in the game folder. Delete leftovers from Manual adjustments before "
+            "creating the ZIP if they should not be packaged.\n\n"
+            "Run it from its own folder: nothing is copied into the game. Use this when the patcher "
+            "has its own window and you choose the game inside it.\n\n"
+            "You will be asked again before the patcher runs."
         )
         text.setWordWrap(True)
         layout.addWidget(text)
-        self.game_radio = QRadioButton("Working directory: game folder")
-        self.patcher_radio = QRadioButton("Working directory: patcher folder")
+        self.game_radio = QRadioButton("Copy into the game folder, then run it there")
+        self.own_radio = QRadioButton("Run it from its own folder")
         self.game_radio.setChecked(True)
         layout.addWidget(self.game_radio)
-        layout.addWidget(self.patcher_radio)
+        layout.addWidget(self.own_radio)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1707,5 +1814,5 @@ class PatcherDialog(QDialog):
         layout.addWidget(buttons)
 
     def _accept(self) -> None:
-        self.workdir = "game" if self.game_radio.isChecked() else "patcher"
+        self.place_in_game = self.game_radio.isChecked()
         self.accept()
