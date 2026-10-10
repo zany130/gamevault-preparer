@@ -43,6 +43,22 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(window.game_dir.exists())
         window.close()
 
+    def test_game_folder_name_fills_title_until_edited(self):
+        window = MainWindow()
+        window.game_dir = Path("/tmp/drive_c/Games/My Game")
+        window._fill_title_from_game_folder()
+        self.assertEqual(window.title_edit.text(), "My Game")
+        self.assertEqual(window.filename_label.text(), "My Game (W_P).zip")
+        window.game_dir = Path("/tmp/drive_c/Games/Other")
+        window._fill_title_from_game_folder()
+        self.assertEqual(window.title_edit.text(), "Other")
+        window.title_edit.setText("Renamed")
+        window.title_edit.textEdited.emit("Renamed")
+        window.game_dir = Path("/tmp/drive_c/Games/Third")
+        window._fill_title_from_game_folder()
+        self.assertEqual(window.title_edit.text(), "Renamed")
+        window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

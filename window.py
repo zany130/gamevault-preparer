@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self._killing = False
         self._start_failed = False
         self._name_error = "Enter a title."
+        self._title_custom = False
         self.manual_continued = False
         self._fix_queue: list[int] = []
         self._fix_pos = 0
@@ -364,6 +365,7 @@ class MainWindow(QMainWindow):
         self.export_btn = QPushButton("Create ZIP")
         self.export_btn.clicked.connect(self.export_zip)
         layout.addWidget(self.export_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.title_edit.textEdited.connect(self._mark_title_custom)
         self.title_edit.textChanged.connect(self.refresh_name)
         self.version_edit.textChanged.connect(self.refresh_name)
         self.year_edit.textChanged.connect(self.refresh_name)
@@ -859,9 +861,18 @@ class MainWindow(QMainWindow):
             return
         self.game_label.setText(str(self.game_dir))
         self.listing.setPlainText(format_listing(self.game_dir))
+        self._fill_title_from_game_folder()
         self.manual_continued = False
         self.set_status("Game folder selected. Add fixes if you want, then continue to packaging.")
         self.refresh_buttons()
+
+    def _mark_title_custom(self, _text: str = "") -> None:
+        self._title_custom = True
+
+    def _fill_title_from_game_folder(self) -> None:
+        if self._title_custom or self.game_dir is None:
+            return
+        self.title_edit.setText(self.game_dir.name)
 
     def _reload_fixes(self, select: int | None = None) -> None:
         self.fix_list.blockSignals(True)
