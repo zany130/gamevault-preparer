@@ -76,7 +76,7 @@ The file is written to `dist/`. The build uses the Python on your `PATH`, so a r
 
 ## What you do in the window
 
-1. Choose an installer EXE, an installer folder, or an ISO. The window shows the folder that will be copied. Staging copies or extracts into a new workspace and leaves the original alone.
+1. Choose an installer EXE, an installer folder, or an ISO. Set **Source folder** to the directory that holds those files, such as `roms/pc`. **Select source** opens there, and the app remembers that folder. The window shows the folder that will be copied. Staging copies or extracts into a new workspace and leaves the original alone.
 2. Launch the installer in a new prefix. Use a location such as `C:\Games\MyGame`. Finish the installer, uncheck Launch game if it is offered, then click **Installation finished**.
 3. Select the installed game folder inside that prefix's `drive_c`.
 4. Optionally add copy fixes or EXE/BAT patchers. **Apply All Fixes** runs the enabled rows in order. New files are copied without another prompt. Overwrites wait for approval. Each patcher waits for a separate **Run** confirmation, then for **Patcher finished**.

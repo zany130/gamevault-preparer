@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -57,6 +58,21 @@ class WindowTests(unittest.TestCase):
         window.game_dir = Path("/tmp/drive_c/Games/Third")
         window._fill_title_from_game_folder()
         self.assertEqual(window.title_edit.text(), "Renamed")
+        window.close()
+
+    def test_source_picker_starts_in_the_chosen_folder(self):
+        window = MainWindow()
+        original = window.source_folder_edit.text()
+        window.source_folder_edit.setText("")
+        self.assertEqual(window._source_picker_start(), str(Path.home()))
+        window.source_folder_edit.setText("/tmp/does-not-exist-gvprep")
+        self.assertEqual(window._source_picker_start(), str(Path.home()))
+        with tempfile.TemporaryDirectory() as raw:
+            window.source_folder_edit.setText(raw)
+            self.assertEqual(Path(window._source_picker_start()), Path(raw))
+        window.source_folder_edit.blockSignals(True)
+        window.source_folder_edit.setText(original)
+        window.source_folder_edit.blockSignals(False)
         window.close()
 
 

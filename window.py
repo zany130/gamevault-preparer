@@ -6,7 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, Qt
+from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -66,6 +66,11 @@ def default_scratch() -> Path:
 
 def default_output() -> Path:
     return Path.home() / "GameVault"
+
+
+def saved_source_folder() -> str:
+    value = QSettings("gamevault-preparer", "gamevault-preparer").value("sourceFolder", "")
+    return str(value or "")
 
 
 def file_manager_arguments(directory: Path) -> list[str]:
@@ -190,7 +195,17 @@ class MainWindow(QMainWindow):
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.output_btn)
 
+        source_folder_row = QHBoxLayout()
+        self.source_folder_edit = QLineEdit(saved_source_folder())
+        self.source_folder_edit.setPlaceholderText("Optional. Select source starts in this folder.")
+        self.source_folder_edit.editingFinished.connect(self._save_source_folder)
+        self.source_folder_btn = QPushButton("Browse…")
+        self.source_folder_btn.clicked.connect(self._browse_source_folder)
+        source_folder_row.addWidget(self.source_folder_edit, 1)
+        source_folder_row.addWidget(self.source_folder_btn)
+
         form = QFormLayout()
+        form.addRow("Source folder", source_folder_row)
         form.addRow("Scratch storage", scratch_row)
         form.addRow("Output folder", output_row)
         layout.addLayout(form)
@@ -428,6 +443,8 @@ class MainWindow(QMainWindow):
         self.scratch_btn.setEnabled(not locked and not staged)
         self.output_edit.setEnabled(not locked)
         self.output_btn.setEnabled(not locked)
+        self.source_folder_edit.setEnabled(not locked)
+        self.source_folder_btn.setEnabled(not locked)
         for radio in (self.exe_radio, self.dir_radio, self.iso_radio):
             radio.setEnabled(not locked and not staged)
         self.choose_btn.setEnabled(not locked and not staged)
@@ -477,13 +494,32 @@ class MainWindow(QMainWindow):
         if chosen:
             edit.setText(chosen)
 
+    def _browse_source_folder(self) -> None:
+        self._browse_dir(self.source_folder_edit, "Source folder")
+        self._save_source_folder()
+
+    def _save_source_folder(self) -> None:
+        QSettings("gamevault-preparer", "gamevault-preparer").setValue(
+            "sourceFolder",
+            self.source_folder_edit.text().strip(),
+        )
+
+    def _source_picker_start(self) -> str:
+        text = self.source_folder_edit.text().strip()
+        if text:
+            folder = Path(text).expanduser()
+            if folder.is_dir():
+                return str(folder)
+        return str(Path.home())
+
     def choose_source(self) -> None:
         kind = self.source_kind()
+        start = self._source_picker_start()
         if kind == "exe":
             chosen, _ = QFileDialog.getOpenFileName(
                 self,
                 "Select the installer",
-                str(Path.home()),
+                start,
                 "Windows executables (*.exe *.EXE);;All files (*)",
             )
             if not chosen:
@@ -493,7 +529,7 @@ class MainWindow(QMainWindow):
             self.source_label.setText(f"Installer: {self.source_path}")
             self.media_label.setText(f"Folder to copy: {self.media_root}")
         elif kind == "directory":
-            chosen = QFileDialog.getExistingDirectory(self, "Select the installer folder", str(Path.home()))
+            chosen = QFileDialog.getExistingDirectory(self, "Select the installer folder", start)
             if not chosen:
                 return
             self.source_path = Path(chosen)
@@ -504,7 +540,7 @@ class MainWindow(QMainWindow):
             chosen, _ = QFileDialog.getOpenFileName(
                 self,
                 "Select the ISO",
-                str(Path.home()),
+                start,
                 "Disc images (*.iso *.ISO);;All files (*)",
             )
             if not chosen:
