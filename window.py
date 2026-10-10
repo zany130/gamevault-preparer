@@ -248,7 +248,6 @@ class MainWindow(QMainWindow):
     def _build_install(self) -> QGroupBox:
         box = QGroupBox("Install")
         layout = QVBoxLayout(box)
-        layout.addWidget(QLabel("Suggested install location: C:\\Games\\MyGame"))
         note = QLabel(
             "Finish the installer, uncheck Launch game if offered, then return here. "
             "The prefix keeps this install separate from your normal Wine setup. "
