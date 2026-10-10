@@ -1,0 +1,10 @@
+#!/bin/sh
+# Launch the bundled app. Wine and xdg-open stay on the host PATH.
+set -eu
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+# Use the copy that sits beside the libraries PyInstaller already loaded.
+if [ -f "$HERE/usr/bin/gvprep/_internal/libarchive.so.13" ]; then
+    export LIBARCHIVE="$HERE/usr/bin/gvprep/_internal/libarchive.so.13"
+fi
+exec "$HERE/usr/bin/gvprep/gvprep" "$@"

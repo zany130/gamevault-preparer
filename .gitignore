@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.partial
+dist/
+*.egg-info/
+*.AppImage
+packaging/.venv/
+packaging/AppDir/
+packaging/.cache/
+packaging/build/

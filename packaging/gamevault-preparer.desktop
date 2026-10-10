@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GameVault Archive Preparer
+Comment=Install a Windows game with Wine and pack the game folder as a GameVault ZIP
+Exec=gamevault-preparer
+Icon=gamevault-preparer
+Categories=Utility;
+Terminal=false
+StartupNotify=true

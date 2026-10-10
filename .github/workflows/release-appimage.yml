@@ -1,0 +1,48 @@
+name: Build AppImage
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system libraries used by the bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            desktop-file-utils \
+            libarchive-dev \
+            libxcb-cursor0
+
+      - name: Build the AppImage
+        run: bash packaging/build-appimage.sh
+
+      - name: Upload the AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameVault-Archive-Preparer-AppImage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+      - name: Attach the AppImage to the GitHub release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" dist/*.AppImage --clobber
