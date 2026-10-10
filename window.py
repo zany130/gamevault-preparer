@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         self._cleanup_dir: Path | None = None
         self._captured = ""
         self._fix_seq = 0
+        self._archive_queue: list[Path] = []
         self._file_managers: list[QProcess] = []
         self.process: QProcess | None = None
         self.wait_process: QProcess | None = None
@@ -421,7 +422,7 @@ class MainWindow(QMainWindow):
     def refresh_buttons(self) -> None:
         if not hasattr(self, "stage_btn"):
             return
-        locked = self.busy or self.mode is not None
+        locked = self.busy or self.mode is not None or bool(self._archive_queue)
         staged = self.workspace is not None
         self.scratch_edit.setEnabled(not locked and not staged)
         self.scratch_btn.setEnabled(not locked and not staged)
@@ -932,7 +933,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Add a copy fix")
         box.setText("What should be copied into the game folder?")
-        archive_btn = box.addButton("ZIP or 7z archive", QMessageBox.ButtonRole.AcceptRole)
+        archive_btn = box.addButton("ZIP or 7z archives", QMessageBox.ButtonRole.AcceptRole)
         files_btn = box.addButton("Loose files", QMessageBox.ButtonRole.AcceptRole)
         folder_btn = box.addButton("Loose folder", QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
@@ -946,28 +947,54 @@ class MainWindow(QMainWindow):
             self._pick_loose_folder()
 
     def _pick_archive_fix(self) -> None:
-        chosen, _ = QFileDialog.getOpenFileName(
+        chosen, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select a ZIP or 7z fix",
+            "Select ZIP or 7z fixes",
             str(Path.home()),
             "Fix archives (*.zip *.7z *.ZIP *.7Z);;All files (*)",
         )
         if not chosen:
             return
-        archive = Path(chosen)
+        archives: list[Path] = []
+        for name in chosen:
+            archive = Path(name)
+            try:
+                archive_kind_for_fix(archive)
+            except FileError as exc:
+                self.show_error(str(exc))
+                return
+            archives.append(archive)
+        self._archive_queue = archives
+        self._start_next_archive()
+
+    def _start_next_archive(self) -> None:
+        if not self._archive_queue or self.fixes_dir is None:
+            self._archive_queue.clear()
+            self.refresh_buttons()
+            return
+        archive = self._archive_queue.pop(0)
         try:
             kind = archive_kind_for_fix(archive)
         except FileError as exc:
+            self._archive_queue.clear()
             self.show_error(str(exc))
             return
         staging = self._new_fix_dir("archive")
-        self.set_status(f"Extracting {archive.name} into staging.")
+        waiting = len(self._archive_queue)
+        status = f"Extracting {archive.name} into staging."
+        if waiting:
+            status += f" {waiting} more still queued."
+        self.set_status(status)
 
         def work(progress):
             extract_archive(archive, staging, kind=kind, progress=progress)
             return staging
 
-        self._start_worker(work, lambda path: self._choose_archive_contents(archive, path), cleanup=staging)
+        self._start_worker(
+            work,
+            lambda path, current=archive: self._choose_archive_contents(current, path),
+            cleanup=staging,
+        )
 
     def _choose_archive_contents(self, archive: Path, staging: Path) -> None:
         options = [(name, "(archive root)" if name == "." else name) for name in child_directories(staging)]
@@ -980,7 +1007,8 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._discard_staging(staging)
-            self.set_status("The archive fix was not added.")
+            self.set_status(f"{archive.name} was not added.")
+            self._start_next_archive()
             return
         chosen = dialog.selected
         source = staging if chosen == "." else staging / chosen
@@ -1091,8 +1119,10 @@ class MainWindow(QMainWindow):
                 if staging is not None:
                     self._discard_staging(staging)
                 self.set_status("The copy fix was not added.")
+                self._start_next_archive()
                 return
             self._append_fix(fix)
+            self._start_next_archive()
 
         self._start_worker(work, done, cleanup=staging)
 
@@ -1449,9 +1479,13 @@ class MainWindow(QMainWindow):
             self.mode = None
             self._fix_queue_active = False
             self._cleanup_dir = None
+            waiting = len(self._archive_queue)
+            self._archive_queue.clear()
             if cleanup is not None:
                 self._discard_staging(cleanup)
             self.log(trace)
+            if waiting:
+                message += f"\n\nThe remaining {waiting} archive(s) were not extracted."
             self.show_error(message)
             self.refresh_buttons()
 
