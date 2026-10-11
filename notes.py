@@ -1,7 +1,7 @@
 """Notes written beside a GameVault ZIP for a person to read.
 
 The ZIP stays the game folder only. These helpers compare two prefix
-snapshots and produce a registry file and a setup-program list. Nothing
+snapshots and produce a registry file and a list of setup programs and libraries. Nothing
 here imports a registry file, launches a program, or builds a winetricks
 command. Verify ZIP does not use the results.
 """
@@ -16,13 +16,13 @@ SOFTWARE_HIVES = (
     ("hklm", r"HKEY_LOCAL_MACHINE\Software"),
     ("hkcu", r"HKEY_CURRENT_USER\Software"),
 )
-SETUP_SUFFIXES = {".exe", ".msi", ".bat"}
+SETUP_SUFFIXES = {".exe", ".msi", ".bat", ".dll"}
 SETUP_HEADER = (
-    "Setup programs added outside the game folder.\n"
+    "Setup programs and libraries added outside the game folder.\n"
     "This is a note for a person. It is not a winetricks script.\n"
     "Paths in the .reg file may still point at the original install.\n"
 )
-NONE_FOUND = "No extra setup programs were found outside the game folder.\n"
+NONE_FOUND = "No extra setup programs or libraries were found outside the game folder.\n"
 
 
 class _Key:
@@ -94,7 +94,7 @@ def list_prefix_files(prefix: Path) -> set[str]:
 
 
 def setup_program_names(before: set[str], after: set[str], game_relative: str) -> list[str]:
-    """File names of new setup programs that are outside the game folder."""
+    """File names of new setup programs and libraries outside the game folder."""
     added = [
         rel
         for rel in after - before

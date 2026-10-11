@@ -89,11 +89,15 @@ class ProgramListTests(unittest.TestCase):
             redist.mkdir()
             (redist / "vcredist_x86.exe").write_bytes(b"MZ")
             (redist / "setup.msi").write_bytes(b"MZ")
+            (redist / "d3dx9_43.dll").write_bytes(b"MZ")
+            (windows / "system32").mkdir()
+            (windows / "system32" / "d3dcompiler_43.dll").write_bytes(b"MZ")
             (redist / "readme.txt").write_bytes(b"hi")
             game = prefix / "drive_c" / "Games" / "Example"
             game.mkdir(parents=True)
             (game / "game.exe").write_bytes(b"MZ")
             (game / "helper.bat").write_bytes(b"echo hi")
+            (game / "engine.dll").write_bytes(b"MZ")
             outside = root / "outside"
             outside.mkdir()
             (outside / "secret.exe").write_bytes(b"MZ")
@@ -104,7 +108,10 @@ class ProgramListTests(unittest.TestCase):
             text = setup_note(names)
         self.assertIn("vcredist_x86.exe", names)
         self.assertIn("setup.msi", names)
+        self.assertIn("d3dx9_43.dll", names)
+        self.assertIn("d3dcompiler_43.dll", names)
         self.assertNotIn("game.exe", names)
+        self.assertNotIn("engine.dll", names)
         self.assertNotIn("helper.bat", names)
         self.assertNotIn("notepad.exe", names)
         self.assertNotIn("secret.exe", names)
@@ -116,7 +123,7 @@ class ProgramListTests(unittest.TestCase):
 
     def test_setup_note_says_when_nothing_was_found(self):
         text = setup_note([])
-        self.assertIn("No extra setup programs were found", text)
+        self.assertIn("No extra setup programs or libraries were found", text)
         self.assertIn("not a winetricks script", text)
 
 
