@@ -32,7 +32,8 @@ jobs:
             libgl1 \
             libxcb-cursor0 \
             7zip \
-            genisoimage
+            genisoimage \
+            zsync
 
       - name: Install Python test dependencies
         run: python -m pip install -r requirements.txt
@@ -47,7 +48,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: GameVault-Archive-Preparer-AppImage
-          path: dist/*.AppImage
+          path: |
+            dist/*.AppImage
+            dist/*.AppImage.zsync
           if-no-files-found: error
 
       - name: Attach the AppImage to the GitHub release
@@ -55,4 +58,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" dist/*.AppImage --clobber
+          gh release upload "${{ github.event.release.tag_name }}" dist/*.AppImage dist/*.AppImage.zsync --clobber
