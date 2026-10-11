@@ -57,6 +57,20 @@ from fixes import (
     plan_for_fix,
     preview_text,
 )
+from notes import (
+    SOFTWARE_HIVES,
+    RegistrySnapshot,
+    encode_registry,
+    list_prefix_files,
+    parse_registry,
+    prefix_relative,
+    read_registry_export,
+    registry_diff_text,
+    setup_note,
+    setup_program_names,
+    sidecar_paths,
+    write_if_absent,
+)
 from packaging import ArchiveNameError, build_archive_name, create_game_zip
 from wine import (
     WineError,
@@ -146,7 +160,22 @@ class MainWindow(QMainWindow):
         self.process: QProcess | None = None
         self.wait_process: QProcess | None = None
         self.killer: QProcess | None = None
+        self._note_process: QProcess | None = None
         self._process_done = None
+        self._files_before: set[str] | None = None
+        self._files_after: set[str] | None = None
+        self._reg_before: RegistrySnapshot | None = None
+        self._reg_after: RegistrySnapshot | None = None
+        self._note_capture = False
+        self._note_phase: str | None = None
+        self._note_start_failed = False
+        self._reg_phase = ""
+        self._reg_index = 0
+        self._reg_parts: RegistrySnapshot | None = None
+        self._reg_failed = False
+        self._reg_settled = False
+        self._reg_dest: Path | None = None
+        self._reg_then = None
 
         self._build_ui()
         self.refresh_name()
@@ -484,6 +513,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "stage_btn"):
             return
         locked = self.busy or self.mode is not None or bool(self._archive_queue)
+        note_capture = self._note_capture
         staged = self.workspace is not None
         self.scratch_edit.setEnabled(not locked and not staged)
         self.scratch_btn.setEnabled(not locked and not staged)
@@ -513,11 +543,18 @@ class MainWindow(QMainWindow):
         self.exe_done_btn.setEnabled(self.mode == "test-ui")
         self.verify_done_btn.setEnabled(self.mode == "verify-ui")
         self.stop_btn.setEnabled(
-            self.prefix_dir is not None and not self.wine_idle and not self._killing
+            self.prefix_dir is not None
+            and (not self.wine_idle or note_capture)
+            and not self._killing
         )
-        game_ready = self.install_ready and self.wine_idle and not locked
+        game_ready = self.install_ready and (self.wine_idle or note_capture) and not locked
         self.game_btn.setEnabled(game_ready)
-        fixes_ready = self.game_dir is not None and self.wine_idle and not locked
+        fixes_ready = (
+            self.game_dir is not None and self.wine_idle and not note_capture and not locked
+        )
+        packaging_ready = (
+            self.game_dir is not None and (self.wine_idle or note_capture) and not locked
+        )
         for button in (self.add_copy_btn, self.add_patcher_btn, self.apply_btn):
             button.setEnabled(fixes_ready)
         row = self.fix_list.currentRow()
@@ -534,8 +571,10 @@ class MainWindow(QMainWindow):
         self.open_game_btn.setEnabled(fixes_ready)
         self.open_prefix_btn.setEnabled(fixes_ready and self.prefix_dir is not None)
         self.run_exe_btn.setEnabled(fixes_ready and self.prefix_dir is not None)
-        self.continue_btn.setEnabled(fixes_ready)
-        self.export_btn.setEnabled(fixes_ready and self.manual_continued and self._name_error == "")
+        self.continue_btn.setEnabled(packaging_ready)
+        self.export_btn.setEnabled(
+            packaging_ready and self.manual_continued and self._name_error == ""
+        )
         self.verify_btn.setEnabled(
             not locked and self.wine_idle and self.exported_zip is not None and self.workspace is not None
         )
@@ -690,11 +729,11 @@ class MainWindow(QMainWindow):
         on_done,
         mode: str,
         prefix: Path | None = None,
-    ) -> None:
+    ) -> bool:
         chosen = prefix if prefix is not None else self.prefix_dir
         if chosen is None:
             self.show_error("There is no Wine prefix for this command.")
-            return
+            return False
         self._active_prefix = chosen
         try:
             require_tools()
@@ -703,10 +742,10 @@ class MainWindow(QMainWindow):
             self.busy = False
             self.mode = None
             self.refresh_buttons()
-            return
+            return False
         if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
             self.show_error("A Wine program from this session is already running.")
-            return
+            return False
         self.busy = True
         self.mode = mode
         self.wine_idle = False
@@ -731,6 +770,7 @@ class MainWindow(QMainWindow):
         self.log("Starting " + program + " " + " ".join(str(arg) for arg in args))
         self.log(f"WINEPREFIX={self._active_prefix}")
         proc.start()
+        return True
 
     def _read_process(self) -> None:
         if self.process is None:
@@ -744,9 +784,19 @@ class MainWindow(QMainWindow):
     def _process_error(self, error) -> None:
         if error != QProcess.ProcessError.FailedToStart or self._start_failed:
             return
+        if self.sender() is not self.process:
+            return
         self._start_failed = True
         self.busy = False
         self.mode = None
+        if self._note_phase == "baseline":
+            self.log("Could not start wine regedit. The registry note will be left out.")
+            callback = self._process_done
+            self._process_done = None
+            if callback is not None:
+                callback(1, False)
+            self.refresh_buttons()
+            return
         self._fix_queue_active = False
         if not self.prefix_initialized:
             self.wine_idle = True
@@ -757,10 +807,13 @@ class MainWindow(QMainWindow):
         self.refresh_buttons()
 
     def _process_finished(self, code: int, status) -> None:
+        if self.sender() is not self.process:
+            return
         self._read_process()
         if self._start_failed:
             return
         if self._stopped:
+            self._note_phase = None
             self.busy = False
             self._settle_after_stop()
             self.refresh_buttons()
@@ -797,7 +850,251 @@ class MainWindow(QMainWindow):
             return
         self.prefix_initialized = True
         self.wine_idle = False
-        self._launch_installer_process()
+        self._begin_baseline_capture()
+
+    def _begin_baseline_capture(self) -> None:
+        """Try a file list and Software export before the installer starts.
+
+        A failed capture is logged. The installer still launches. The registry
+        export has to finish before the installer, or the installer's own
+        writes mix into the baseline.
+        """
+        if self.prefix_dir is None or self.workspace is None:
+            self._launch_installer_process()
+            return
+        self.busy = True
+        self.mode = "working"
+        self.wine_idle = False
+        self.set_status("Recording the prefix before the installer starts.")
+        self.refresh_buttons()
+        prefix = self.prefix_dir
+
+        def work(_progress):
+            return list_prefix_files(prefix)
+
+        def finish(result) -> None:
+            self.busy = False
+            self.mode = None
+            if isinstance(result, Exception):
+                self.log(f"Could not list prefix files before installation: {result}")
+                self._files_before = None
+            else:
+                self._files_before = result
+                self.log(f"Listed {len(result)} prefix files before installation.")
+            if self._stopped:
+                self.refresh_buttons()
+                self._settle_after_stop()
+                return
+            self._begin_registry_capture("baseline", self._launch_installer_process)
+
+        self._start_quiet_worker(work, finish)
+
+    def _start_after_capture(self) -> None:
+        """Try the second snapshot in the background. The ZIP does not wait for it."""
+        if self.prefix_dir is None or self.workspace is None:
+            return
+        if self._files_before is None and self._reg_before is None:
+            self.log(
+                "No prefix snapshot was saved before installation, "
+                "so the notes beside the ZIP will be left out."
+            )
+            return
+        self._note_capture = True
+        self.refresh_buttons()
+        self.log("Recording the prefix after installation. You can select the game folder while this runs.")
+        if self._files_before is None:
+            self.log(
+                "The file list from before installation was not saved, so the setup note will be left out."
+            )
+            self._files_after = None
+            self._after_files_done()
+            return
+        prefix = self.prefix_dir
+
+        def work(_progress):
+            return list_prefix_files(prefix)
+
+        def finish(result) -> None:
+            if isinstance(result, Exception):
+                self.log(f"Could not list prefix files after installation: {result}")
+                self._files_after = None
+            else:
+                self._files_after = result
+                self.log(f"Listed {len(result)} prefix files after installation.")
+            if self._stopped:
+                self._note_capture = False
+                self.refresh_buttons()
+                self._settle_after_stop()
+                return
+            self._after_files_done()
+
+        self._start_quiet_worker(work, finish)
+
+    def _after_files_done(self) -> None:
+        if self._reg_before is None:
+            self.log(
+                "The registry snapshot from before installation was not saved, "
+                "so the .reg note will be left out."
+            )
+            self._reg_after = None
+            self._note_capture = False
+            self.refresh_buttons()
+            return
+        self._begin_registry_capture("after", None)
+
+    def _begin_registry_capture(self, phase: str, then) -> None:
+        self._reg_phase = phase
+        self._reg_then = then
+        self._reg_index = 0
+        self._reg_parts = RegistrySnapshot()
+        self._reg_failed = False
+        self._reg_settled = False
+        self._reg_dest = None
+        self._export_next_hive()
+
+    def _registry_export_path(self, phase: str, hive: str) -> Path | None:
+        if self.workspace is None:
+            return None
+        folder = self.workspace / "notes"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.log(f"Could not create the note folder: {exc}")
+            return None
+        return folder / f"{phase}-{hive}.reg"
+
+    def _export_next_hive(self) -> None:
+        if self._reg_failed or self._reg_index >= len(SOFTWARE_HIVES):
+            self._finish_registry_capture()
+            return
+        hive, key = SOFTWARE_HIVES[self._reg_index]
+        dest = self._registry_export_path(self._reg_phase, hive)
+        if dest is None:
+            self._give_up_registry(key, "there is no workspace folder for the export")
+            return
+        try:
+            if dest.is_symlink() or dest.exists():
+                dest.unlink()
+        except OSError as exc:
+            self._give_up_registry(key, str(exc))
+            return
+        self._reg_dest = dest
+        if self._reg_phase == "after":
+            self._start_after_regedit(dest, key)
+            return
+        self._note_phase = "baseline"
+        started = self._run_prefix_command(
+            "wine",
+            ["regedit", "/E", os.fspath(dest), key],
+            self.workspace,
+            self._baseline_hive_finished,
+            "waiting-processes",
+        )
+        if not started and not self._reg_settled:
+            self._note_phase = None
+            self._give_up_registry(key, "wine regedit did not start")
+
+    def _baseline_hive_finished(self, code: int, normal: bool) -> None:
+        self._accept_hive_export(code, normal)
+
+    def _start_after_regedit(self, dest: Path, key: str) -> None:
+        if self.prefix_dir is None:
+            self._give_up_registry(key, "there is no Wine prefix")
+            return
+        self._note_capture = True
+        self._note_start_failed = False
+        self._active_prefix = self.prefix_dir
+        proc = QProcess(self)
+        proc.setProgram("wine")
+        proc.setArguments(["regedit", "/E", os.fspath(dest), key])
+        proc.setProcessEnvironment(self._wine_env(self.prefix_dir))
+        if self.workspace is not None:
+            proc.setWorkingDirectory(str(self.workspace))
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        proc.readyReadStandardOutput.connect(lambda: self._read_extra(proc))
+        proc.errorOccurred.connect(self._note_regedit_error)
+        proc.finished.connect(self._note_regedit_finished)
+        self._note_process = proc
+        self.log(f"Starting wine regedit /E {dest} {key}")
+        self.log(f"WINEPREFIX={self.prefix_dir}")
+        proc.start()
+        self.refresh_buttons()
+
+    def _note_regedit_error(self, error) -> None:
+        if error != QProcess.ProcessError.FailedToStart or self._note_start_failed:
+            return
+        self._note_start_failed = True
+        _hive, key = SOFTWARE_HIVES[self._reg_index]
+        self._give_up_registry(key, "wine regedit could not be started")
+
+    def _note_regedit_finished(self, code: int, status) -> None:
+        if self._note_start_failed:
+            self._note_start_failed = False
+            return
+        if self._stopped:
+            self._reg_failed = True
+            self._finish_registry_capture()
+            self._settle_after_stop()
+            return
+        normal = status == QProcess.ExitStatus.NormalExit
+        self._accept_hive_export(int(code), normal)
+
+    def _accept_hive_export(self, code: int, normal: bool) -> None:
+        dest = self._reg_dest
+        _hive, key = SOFTWARE_HIVES[self._reg_index]
+        if code != 0 or not normal or dest is None or dest.is_symlink() or not dest.is_file():
+            self._give_up_registry(key, f"exit {code}")
+            return
+        try:
+            if dest.stat().st_size == 0:
+                self._give_up_registry(key, "the export was empty")
+                return
+            parsed = parse_registry(read_registry_export(dest))
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._give_up_registry(key, str(exc))
+            return
+        if not parsed.has_key(key):
+            self._give_up_registry(key, "the export did not contain that key")
+            return
+        if self._reg_parts is None:
+            self._reg_parts = RegistrySnapshot()
+        self._reg_parts.add_snapshot(parsed)
+        self._reg_index += 1
+        self._export_next_hive()
+
+    def _give_up_registry(self, key: str, reason: str) -> None:
+        self.log(
+            f"Could not export {key} for the {self._reg_phase} note ({reason}). "
+            "The registry note will be left out."
+        )
+        self._reg_failed = True
+        self._finish_registry_capture()
+
+    def _finish_registry_capture(self) -> None:
+        if self._reg_settled:
+            return
+        self._reg_settled = True
+        phase = self._reg_phase
+        then = self._reg_then
+        self._reg_then = None
+        self._note_phase = None
+        if self._reg_failed or self._reg_parts is None:
+            if phase == "baseline":
+                self._reg_before = None
+            else:
+                self._reg_after = None
+        elif phase == "baseline":
+            self._reg_before = self._reg_parts
+            self.log("Saved the Software registry from before installation.")
+        else:
+            self._reg_after = self._reg_parts
+            self.log("Saved the Software registry from after installation.")
+        if phase == "after":
+            self._note_capture = False
+            self._note_process = None
+            self.refresh_buttons()
+        if then is not None:
+            then()
 
     def _launch_installer_process(self) -> None:
         self.install_launched = True
@@ -887,6 +1184,7 @@ class MainWindow(QMainWindow):
         if self._idle_kind == "install":
             self.install_ready = True
             self.set_status("Wine is idle. Select the installed game folder.")
+            self._start_after_capture()
         elif self._idle_kind == "test":
             self.set_status("Wine is idle. You can edit the game folder or prefix, then click Continue.")
         elif self._idle_kind == "verify":
@@ -909,7 +1207,9 @@ class MainWindow(QMainWindow):
 
     def stop_wine(self) -> None:
         target = self._active_prefix or self.prefix_dir
-        if target is None or self.wine_idle or self._killing:
+        if target is None or self._killing:
+            return
+        if self.wine_idle and not self._note_capture:
             return
         answer = QMessageBox.question(
             self,
@@ -951,7 +1251,12 @@ class MainWindow(QMainWindow):
     def _settle_after_stop(self) -> None:
         if self._stop_settled:
             return
-        if self._process_running(self.process) or self._process_running(self.wait_process) or self._killing:
+        if (
+            self._process_running(self.process)
+            or self._process_running(self.wait_process)
+            or self._process_running(self._note_process)
+            or self._killing
+        ):
             self.set_status("Waiting for this session's Wine processes to exit.")
             return
         self._stop_settled = True
@@ -1667,7 +1972,9 @@ class MainWindow(QMainWindow):
         return qenv
 
     def continue_to_export(self) -> None:
-        if self.game_dir is None or not self.wine_idle or self.busy or self.mode is not None:
+        if self.game_dir is None or self.busy or self.mode is not None:
+            return
+        if not self.wine_idle and not self._note_capture:
             return
         self.manual_continued = True
         self.set_status(
@@ -1681,7 +1988,7 @@ class MainWindow(QMainWindow):
             return
         if self.game_dir is None or self.workspace is None or self.protected_source is None:
             return
-        if not self.wine_idle:
+        if not self.wine_idle and not self._note_capture:
             self.show_error("Wait until this session's Wine processes have stopped before creating the ZIP.")
             return
         try:
@@ -1716,15 +2023,60 @@ class MainWindow(QMainWindow):
                 "Archive created. Gameplay compatibility has not been tested. "
                 "Verify ZIP is optional."
             )
+            note_text = self._write_install_notes(path)
             QMessageBox.information(
                 self,
                 "Archive created",
                 "Archive created. Gameplay compatibility has not been tested.\n\n"
                 "Verify ZIP is optional. It unpacks this ZIP into a new Wine prefix "
-                "and runs an EXE you choose.\n\n" + str(path),
+                "and runs an EXE you choose. It does not read the notes beside the archive.\n\n"
+                f"{path}\n\n{note_text}",
             )
 
         self._start_worker(work, done)
+
+    def _write_install_notes(self, archive: Path) -> str:
+        """Write whichever notes have both snapshots. Verify ZIP does not read them."""
+        reg_path, setup_path = sidecar_paths(archive)
+        lines = [
+            "Notes beside the archive are for you to read. Verify ZIP does not use them.",
+            self._write_registry_note(reg_path),
+            self._write_setup_note(setup_path),
+        ]
+        for line in lines:
+            self.log(line)
+        return "\n".join(lines)
+
+    def _write_registry_note(self, path: Path) -> str:
+        if self._reg_before is None or self._reg_after is None:
+            return "The registry note was not ready and was left out."
+        try:
+            data = encode_registry(registry_diff_text(self._reg_before, self._reg_after))
+            if write_if_absent(path, data):
+                return f"Registry note: {path}"
+            return f"Left the existing registry note unchanged: {path}"
+        except OSError as exc:
+            return f"Could not write the registry note: {exc}"
+
+    def _write_setup_note(self, path: Path) -> str:
+        if (
+            self._files_before is None
+            or self._files_after is None
+            or self.game_dir is None
+            or self.prefix_dir is None
+        ):
+            return "The setup-program note was not ready and was left out."
+        try:
+            names = setup_program_names(
+                self._files_before,
+                self._files_after,
+                prefix_relative(self.prefix_dir, self.game_dir),
+            )
+            if write_if_absent(path, setup_note(names).encode("utf-8")):
+                return f"Setup-program note: {path}"
+            return f"Left the existing setup note unchanged: {path}"
+        except (OSError, ValueError) as exc:
+            return f"Could not write the setup-program note: {exc}"
 
     def verify_zip(self) -> None:
         if self.exported_zip is None or self.workspace is None or not self.wine_idle or self.mode is not None:
@@ -1958,6 +2310,27 @@ class MainWindow(QMainWindow):
         worker.finished.connect(finished)
         worker.start()
 
+    def _start_quiet_worker(self, fn, on_done) -> None:
+        """Run a snapshot in the background without treating a failure as a dialog."""
+        worker = FunctionWorker(fn, self)
+        self._workers.append(worker)
+
+        def ok(result) -> None:
+            on_done(result)
+
+        def fail(message: str, trace: str) -> None:
+            self.log(trace)
+            on_done(OSError(message))
+
+        def finished() -> None:
+            if worker in self._workers:
+                self._workers.remove(worker)
+
+        worker.succeeded.connect(ok)
+        worker.failed.connect(fail)
+        worker.finished.connect(finished)
+        worker.start()
+
     def _on_progress(self, percent: int, message: str) -> None:
         self.progress.setValue(percent)
         if message:
@@ -1967,8 +2340,10 @@ class MainWindow(QMainWindow):
         running = (
             self.busy
             or self.mode is not None
+            or self._note_capture
             or self._process_running(self.process)
             or self._process_running(self.wait_process)
+            or self._process_running(self._note_process)
             or self._killing
         )
         if running:

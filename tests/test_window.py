@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from notes import list_prefix_files, parse_registry, read_registry_export, sidecar_paths
 from window import MainWindow, file_manager_arguments
 
 
@@ -89,6 +90,91 @@ class WindowTests(unittest.TestCase):
         window.source_folder_edit.blockSignals(True)
         window.source_folder_edit.setText(original)
         window.source_folder_edit.blockSignals(False)
+        window.close()
+
+    def test_note_capture_leaves_game_selection_and_export_available(self):
+        window = MainWindow()
+        window.install_ready = True
+        window.install_launched = True
+        window.game_dir = Path("/tmp/game")
+        window.prefix_dir = Path("/tmp/prefix")
+        window.manual_continued = True
+        window.wine_idle = True
+        window._note_capture = True
+        window.title_edit.setText("Halo")
+        window.refresh_buttons()
+        self.assertTrue(window.game_btn.isEnabled())
+        self.assertTrue(window.export_btn.isEnabled())
+        self.assertTrue(window.continue_btn.isEnabled())
+        self.assertFalse(window.run_exe_btn.isEnabled())
+        self.assertFalse(window.apply_btn.isEnabled())
+        self.assertTrue(window.stop_btn.isEnabled())
+        window._note_capture = False
+        window.prefix_dir = None
+        window.close()
+
+    def test_ready_notes_are_written_beside_the_zip_without_overwrite(self):
+        window = MainWindow()
+        before = """Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\\Software\\Existing]
+"Keep"="yes"
+
+"""
+        after = """Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\\Software\\Existing]
+"Keep"="yes"
+
+[HKEY_LOCAL_MACHINE\\Software\\NewGame]
+"Added"="1"
+
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prefix = root / "prefix"
+            game = prefix / "drive_c" / "Games" / "Example"
+            game.mkdir(parents=True)
+            (game / "game.exe").write_bytes(b"MZ")
+            redist = prefix / "drive_c" / "redist"
+            redist.mkdir()
+            (redist / "vcredist_x86.exe").write_bytes(b"MZ")
+            window.prefix_dir = prefix
+            window.game_dir = game.resolve()
+            window._files_before = set()
+            window._files_after = list_prefix_files(prefix)
+            window._reg_before = parse_registry(before)
+            window._reg_after = parse_registry(after)
+            archive = root / "Example (W_P).zip"
+            archive.write_bytes(b"PK")
+            summary = window._write_install_notes(archive)
+            reg_path, setup_path = sidecar_paths(archive)
+            setup_text = setup_path.read_text(encoding="utf-8")
+            setup_bytes = setup_path.read_bytes()
+            reg_bytes = reg_path.read_bytes()
+            reg_text = read_registry_export(reg_path)
+            self.assertIn("vcredist_x86.exe", setup_text)
+            self.assertNotIn("game.exe", setup_text)
+            self.assertIn("NewGame", reg_text)
+            self.assertNotIn("Keep", reg_text)
+            self.assertIn("Verify ZIP does not use them", summary)
+            again = window._write_install_notes(archive)
+            self.assertIn("unchanged", again)
+            self.assertEqual(reg_path.read_bytes(), reg_bytes)
+            self.assertEqual(setup_path.read_bytes(), setup_bytes)
+            window._reg_before = None
+            window._reg_after = None
+            other = root / "Other (W_P).zip"
+            other.write_bytes(b"PK")
+            skipped = window._write_install_notes(other)
+            other_reg, other_setup = sidecar_paths(other)
+            self.assertFalse(other_reg.exists())
+            self.assertTrue(other_setup.is_file())
+            self.assertIn("registry note was not ready", skipped)
+            self.assertIn("vcredist_x86.exe", other_setup.read_text(encoding="utf-8"))
+        window.prefix_dir = None
+        window.game_dir = None
+        window.workspace = None
         window.close()
 
 
