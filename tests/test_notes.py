@@ -55,7 +55,8 @@ class RegistryDiffTests(unittest.TestCase):
         self.assertIn("[HKEY_LOCAL_MACHINE\\Software\\NewGame]", text)
         self.assertIn('"Added"="1"', text)
         self.assertIn('"Blob"=hex:01,02,\\\n  03,04', text)
-        self.assertIn("[HKEY_CURRENT_USER\\Software\\Wine]", text)
+        self.assertNotIn("[HKEY_CURRENT_USER\\Software\\Wine]", text)
+        self.assertNotIn('"Version"', text)
         self.assertNotIn('"Keep"=', text)
         self.assertNotIn('"keep"=', text)
         self.assertNotIn('"Path"=', text)
@@ -75,6 +76,46 @@ class RegistryDiffTests(unittest.TestCase):
         self.assertIn("; No Software values were added.", text)
         self.assertNotIn("[HKEY_", text)
 
+    def test_wine_environment_is_omitted_and_game_keys_stay(self):
+        after = """Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\\Software\\Wine]
+"Version"="10"
+
+[HKEY_CURRENT_USER\\Software\\Wine\\Drivers]
+"Graphics"="x11"
+"Audio"="pulse"
+
+[HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Wine\\X11 Driver]
+"ScreenDepth"="32"
+
+[HKEY_CURRENT_USER\\Software\\Wine\\Direct3D]
+"VideoMemorySize"="1024"
+
+[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\game.exe]
+"Version"="win10"
+
+[HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Ubi Soft\\RAYMAN 3]
+"InstallPath"="C:\\\\GOG Games\\\\Rayman 3"
+
+[HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Example]
+"DisplayName"="Example"
+
+"""
+        text = registry_diff_text(parse_registry(""), parse_registry(after))
+        self.assertNotIn("[HKEY_CURRENT_USER\\Software\\Wine]", text)
+        self.assertNotIn("Drivers", text)
+        self.assertNotIn("X11 Driver", text)
+        self.assertNotIn("Direct3D", text)
+        self.assertNotIn("VideoMemorySize", text)
+        self.assertIn("[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\game.exe]", text)
+        self.assertIn('"Version"="win10"', text)
+        self.assertIn("[HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Ubi Soft\\RAYMAN 3]", text)
+        self.assertIn('"InstallPath"="C:\\\\GOG Games\\\\Rayman 3"', text)
+        self.assertIn("Uninstall\\Example", text)
+        self.assertIn('"DisplayName"="Example"', text)
+        self.assertTrue(text.startswith("Windows Registry Editor Version 5.00"))
+
 
 class ProgramListTests(unittest.TestCase):
     def test_new_setup_program_outside_the_game_folder_is_listed(self):
@@ -92,6 +133,7 @@ class ProgramListTests(unittest.TestCase):
             (redist / "d3dx9_43.dll").write_bytes(b"MZ")
             (windows / "system32").mkdir()
             (windows / "system32" / "d3dcompiler_43.dll").write_bytes(b"MZ")
+            (windows / "system32" / "d3dx9_43.dll").write_bytes(b"MZ")
             (redist / "readme.txt").write_bytes(b"hi")
             game = prefix / "drive_c" / "Games" / "Example"
             game.mkdir(parents=True)
@@ -106,16 +148,24 @@ class ProgramListTests(unittest.TestCase):
             after = list_prefix_files(prefix)
             names = setup_program_names(before, after, "drive_c/Games/Example")
             text = setup_note(names)
-        self.assertIn("vcredist_x86.exe", names)
-        self.assertIn("setup.msi", names)
-        self.assertIn("d3dx9_43.dll", names)
-        self.assertIn("d3dcompiler_43.dll", names)
+        self.assertEqual(
+            names,
+            [
+                "drive_c/redist/d3dx9_43.dll",
+                "drive_c/redist/setup.msi",
+                "drive_c/redist/vcredist_x86.exe",
+                "drive_c/windows/system32/d3dcompiler_43.dll",
+                "drive_c/windows/system32/d3dx9_43.dll",
+            ],
+        )
         self.assertNotIn("game.exe", names)
         self.assertNotIn("engine.dll", names)
         self.assertNotIn("helper.bat", names)
         self.assertNotIn("notepad.exe", names)
         self.assertNotIn("secret.exe", names)
         self.assertNotIn("link.exe", names)
+        self.assertIn("drive_c/windows/system32/d3dx9_43.dll", text)
+        self.assertIn("relative to the Wine prefix", text)
         self.assertNotIn("readme.txt", text)
         self.assertIn("note for a person", text)
         self.assertIn("not a winetricks script", text)

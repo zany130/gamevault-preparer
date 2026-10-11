@@ -5,6 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import shiboken6
 from PySide6.QtWidgets import QApplication
 
 from notes import list_prefix_files, parse_registry, read_registry_export, sidecar_paths
@@ -15,6 +16,20 @@ class WindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    @classmethod
+    def tearDownClass(cls):
+        # PySide destroys QApplication during interpreter shutdown and segfaults
+        # in QObject's destructor. Delete it while the interpreter is still running.
+        app = cls.app
+        cls.app = None
+        if app is None or not shiboken6.isValid(app):
+            return
+        for widget in app.topLevelWidgets():
+            widget.close()
+            widget.deleteLater()
+        app.processEvents()
+        shiboken6.delete(app)
 
     def test_window_opens_and_previews_the_archive_name(self):
         window = MainWindow()
@@ -153,7 +168,7 @@ class WindowTests(unittest.TestCase):
             setup_bytes = setup_path.read_bytes()
             reg_bytes = reg_path.read_bytes()
             reg_text = read_registry_export(reg_path)
-            self.assertIn("vcredist_x86.exe", setup_text)
+            self.assertIn("drive_c/redist/vcredist_x86.exe", setup_text)
             self.assertNotIn("game.exe", setup_text)
             self.assertIn("NewGame", reg_text)
             self.assertNotIn("Keep", reg_text)
@@ -171,7 +186,7 @@ class WindowTests(unittest.TestCase):
             self.assertFalse(other_reg.exists())
             self.assertTrue(other_setup.is_file())
             self.assertIn("registry note was not ready", skipped)
-            self.assertIn("vcredist_x86.exe", other_setup.read_text(encoding="utf-8"))
+            self.assertIn("drive_c/redist/vcredist_x86.exe", other_setup.read_text(encoding="utf-8"))
         window.prefix_dir = None
         window.game_dir = None
         window.workspace = None

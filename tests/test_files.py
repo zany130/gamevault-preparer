@@ -15,6 +15,7 @@ from files import (
     create_workspace,
     delete_workspace,
     exe_inside,
+    _extract_with_7zip,
     extract_archive,
     find_patcher_programs,
     plan_loose_files,
@@ -258,6 +259,79 @@ class IsoTests(unittest.TestCase):
             self.assertFalse(any(scratch.glob("gvprep-*")))
             self.assertEqual(placed.read_bytes(), before)
 
+    def test_7zip_does_not_write_outside_the_stage(self):
+        tool = shutil_which("7zz") or shutil_which("7z")
+        if tool is None:
+            self.skipTest("7-Zip is not installed")
+        os.environ.pop("GVPREP_7ZIP", None)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            outside = root / "outside"
+            outside.mkdir()
+            sentinel = outside / "sentinel.txt"
+            sentinel.write_text("original")
+            before = sentinel.read_bytes()
+            src = root / "src"
+            src.mkdir()
+            (src / "readme.txt").write_text("hello")
+            os.symlink(sentinel, src / "escape")
+            os.symlink("/etc/passwd", src / "abs")
+            links = root / "links.7z"
+            subprocess_run([tool, "a", "-snl", "-y", os.fspath(links), "src"], cwd=root)
+            dest = root / "stage"
+            dest.mkdir()
+            with self.assertRaises(FileError):
+                _extract_with_7zip(links, dest, None)
+            self.assertEqual(list(dest.iterdir()), [])
+            self.assertEqual(sentinel.read_bytes(), before)
+            self.assertEqual(list(outside.iterdir()), [sentinel])
+
+            nest = root / "nest"
+            nest.mkdir()
+            (nest / "outside.txt").write_text("out")
+            parent = root / "parent.7z"
+            subprocess_run([tool, "a", "-y", os.fspath(parent), "nest/outside.txt"], cwd=root)
+            subprocess_run([tool, "rn", os.fspath(parent), "nest/outside.txt", "../outside.txt"])
+            with self.assertRaises(FileError):
+                _extract_with_7zip(parent, dest, None)
+            self.assertEqual(list(dest.iterdir()), [])
+            self.assertFalse((root / "outside.txt").exists())
+            self.assertEqual(list(outside.iterdir()), [sentinel])
+
+    def test_udf_symlink_does_not_write_outside_the_stage(self):
+        tool = shutil_which("7zz") or shutil_which("7z")
+        if tool is None:
+            self.skipTest("7-Zip is not installed")
+        os.environ.pop("GVPREP_7ZIP", None)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            outside = root / "outside"
+            outside.mkdir()
+            sentinel = outside / "sentinel.txt"
+            sentinel.write_text("original")
+            before = sentinel.read_bytes()
+            source = root / "src"
+            source.mkdir()
+            (source / "readme.txt").write_text("hello")
+            os.symlink(sentinel, source / "escape")
+            os.symlink("/etc/passwd", source / "abs")
+            image = root / "game.iso"
+            subprocess_run(
+                [self._require_genisoimage(), "-o", str(image), "-udf", "-R", str(source)],
+            )
+            dest = root / "stage"
+            dest.mkdir()
+            try:
+                extract_archive(image, dest, kind="iso")
+            except FileError:
+                self.assertEqual(list(dest.iterdir()), [])
+            else:
+                for path in dest.rglob("*"):
+                    self.assertFalse(path.is_symlink(), path)
+            self.assertEqual(sentinel.read_bytes(), before)
+            self.assertEqual(list(outside.iterdir()), [sentinel])
+            self.assertFalse((root / "passwd").exists())
+
     def test_7zip_listing_rejects_unsafe_entries(self):
         samples = [
             "Path = ../outside.txt\nFolder = -\nSize = 1\n",
@@ -289,8 +363,8 @@ def shutil_which(name: str) -> str | None:
     return __import__("shutil").which(name)
 
 
-def subprocess_run(args: list[str]) -> None:
-    completed = __import__("subprocess").run(args, capture_output=True, check=False)
+def subprocess_run(args: list[str], cwd: Path | None = None) -> None:
+    completed = __import__("subprocess").run(args, cwd=cwd, capture_output=True, check=False)
     if completed.returncode != 0:
         raise AssertionError(completed.stderr.decode("utf-8", "replace"))
 

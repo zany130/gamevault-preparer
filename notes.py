@@ -19,8 +19,32 @@ SOFTWARE_HIVES = (
 SETUP_SUFFIXES = {".exe", ".msi", ".bat", ".dll"}
 SETUP_HEADER = (
     "Setup programs and libraries added outside the game folder.\n"
+    "Each line is a path relative to the Wine prefix.\n"
     "This is a note for a person. It is not a winetricks script.\n"
     "Paths in the .reg file may still point at the original install.\n"
+)
+# Wine's own environment and device settings. Other Software keys, including
+# unknown keys under Software\Wine, stay in the note.
+_WINE_NOISE = (
+    "wine",
+    "wine\\drivers",
+    "wine\\x11 driver",
+    "wine\\mac driver",
+    "wine\\wayland driver",
+    "wine\\direct3d",
+    "wine\\directsound",
+    "wine\\directinput",
+    "wine\\network",
+    "wine\\fonts",
+    "wine\\explorer",
+    "wine\\fileopenassociations",
+    "wine\\dlloverrides",
+    "wine\\debug",
+    "wine\\licenseinformation",
+    "wine\\ports",
+    "wine\\mshtml",
+    "wine\\winedbg",
+    "wine\\version",
 )
 NONE_FOUND = "No extra setup programs or libraries were found outside the game folder.\n"
 
@@ -94,25 +118,14 @@ def list_prefix_files(prefix: Path) -> set[str]:
 
 
 def setup_program_names(before: set[str], after: set[str], game_relative: str) -> list[str]:
-    """File names of new setup programs and libraries outside the game folder."""
+    """Prefix-relative paths of new setup programs and libraries outside the game folder."""
     added = [
         rel
         for rel in after - before
         if Path(rel).suffix.casefold() in SETUP_SUFFIXES and not _is_under(rel, game_relative)
     ]
-    added.sort(key=lambda rel: (Path(rel).name.casefold(), rel.casefold()))
-    counts: dict[str, int] = {}
-    for rel in added:
-        name = Path(rel).name.casefold()
-        counts[name] = counts.get(name, 0) + 1
-    lines: list[str] = []
-    for rel in added:
-        name = Path(rel).name
-        if counts[name.casefold()] > 1:
-            lines.append(f"{name} ({rel})")
-        else:
-            lines.append(name)
-    return lines
+    added.sort(key=str.casefold)
+    return added
 
 
 def setup_note(names: list[str]) -> str:
@@ -160,7 +173,7 @@ def registry_diff_text(before: RegistrySnapshot, after: RegistrySnapshot) -> str
     wrote = False
     for norm in after._order:
         key = after._keys[norm]
-        if not _is_software_key(key.display):
+        if not _is_software_key(key.display) or _is_wine_noise(key.display):
             continue
         prior = before._keys.get(norm)
         chosen: list[str] = []
@@ -234,6 +247,31 @@ def _norm(value: str) -> str:
 def _is_software_key(key: str) -> bool:
     folded = key.casefold()
     return folded.startswith(r"hkey_local_machine\software") or folded.startswith(r"hkey_current_user\software")
+
+
+def _is_wine_noise(key: str) -> bool:
+    folded = key.casefold()
+    rest = ""
+    for prefix in (r"hkey_local_machine\software", r"hkey_current_user\software"):
+        if folded == prefix:
+            return False
+        if folded.startswith(prefix + "\\"):
+            rest = folded[len(prefix) + 1 :]
+            break
+    else:
+        return False
+    if rest == "wow6432node":
+        return False
+    if rest.startswith("wow6432node\\"):
+        rest = rest[len("wow6432node\\") :]
+    for item in _WINE_NOISE:
+        if item == "wine":
+            if rest == "wine":
+                return True
+            continue
+        if rest == item or rest.startswith(item + "\\"):
+            return True
+    return False
 
 
 def _is_under(relative: str, root: str) -> bool:

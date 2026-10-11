@@ -1,4 +1,5 @@
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -7,6 +8,17 @@ from pathlib import Path
 
 from files import FileError, create_workspace
 from packaging import ArchiveNameError, build_archive_name, create_game_zip
+
+
+class PackageTests(unittest.TestCase):
+    def test_pyproject_lists_every_application_module(self):
+        root = Path(__file__).resolve().parents[1]
+        text = (root / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r"^py-modules = \[(.*?)]", text, re.M | re.S)
+        self.assertIsNotNone(match)
+        listed = set(re.findall(r'"([^"]+)"', match.group(1)))
+        modules = {path.stem for path in root.glob("*.py")}
+        self.assertEqual(listed, modules)
 
 
 class NameTests(unittest.TestCase):
