@@ -14,10 +14,12 @@ from files import (
     copy_regular_file,
     create_workspace,
     delete_workspace,
+    exe_inside,
     extract_archive,
     find_patcher_programs,
     plan_loose_files,
     plan_tree,
+    real_exe,
     safe_archive_path,
     stage_media,
     validate_game_folder,
@@ -457,6 +459,36 @@ class StageTests(unittest.TestCase):
             empty.mkdir()
             with self.assertRaises(FileError):
                 validate_game_folder(empty, prefix)
+
+
+class RealExeTests(unittest.TestCase):
+    def test_accepts_a_real_exe_and_rejects_links_and_other_files(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            program = root / "Game.exe"
+            program.write_bytes(b"MZ")
+            self.assertEqual(real_exe(program), program.resolve())
+            (root / "notes.txt").write_text("hi")
+            with self.assertRaises(FileError):
+                real_exe(root / "notes.txt")
+            (root / "linked.exe").symlink_to(program)
+            with self.assertRaises(FileError):
+                real_exe(root / "linked.exe")
+            with self.assertRaises(FileError):
+                real_exe(root)
+
+    def test_exe_must_stay_inside_the_unpacked_zip(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            game = root / "game"
+            game.mkdir()
+            program = game / "Game.exe"
+            program.write_bytes(b"MZ")
+            outside = root / "other.exe"
+            outside.write_bytes(b"MZ")
+            self.assertEqual(exe_inside(game, program), program.resolve())
+            with self.assertRaises(FileError):
+                exe_inside(game, outside)
 
 
 class PatcherFixTests(unittest.TestCase):

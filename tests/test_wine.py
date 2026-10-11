@@ -2,7 +2,15 @@ import os
 import unittest
 from pathlib import Path
 
-from wine import WineError, bat_command_arguments, parse_winepath_output, prefixed_environment, quote_cmd_path
+from wine import (
+    COMMON_WINETRICKS_VERBS,
+    WineError,
+    bat_command_arguments,
+    parse_winepath_output,
+    prefixed_environment,
+    quote_cmd_path,
+    winetricks_arguments,
+)
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -29,6 +37,31 @@ class EnvironmentTests(unittest.TestCase):
                 os.environ.pop("LD_LIBRARY_PATH", None)
             else:
                 os.environ["LD_LIBRARY_PATH"] = previous
+
+
+class WinetricksArgumentTests(unittest.TestCase):
+    def test_quiet_arguments_use_only_the_common_verbs(self):
+        self.assertEqual(
+            winetricks_arguments(COMMON_WINETRICKS_VERBS),
+            [
+                "-q",
+                "d3dx9",
+                "d3dx10",
+                "d3dx11_43",
+                "d3dcompiler_43",
+                "d3dcompiler_47",
+                "xact",
+                "vcrun2008",
+                "vcrun2010",
+                "vcrun2019",
+            ],
+        )
+        with self.assertRaises(WineError):
+            winetricks_arguments(())
+        with self.assertRaises(WineError):
+            winetricks_arguments(("directx9",))
+        with self.assertRaises(WineError):
+            winetricks_arguments(("d3dx9", "d3dx9"))
 
 
 class BatQuotingTests(unittest.TestCase):

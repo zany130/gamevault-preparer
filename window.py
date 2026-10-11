@@ -10,6 +10,7 @@ from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -37,8 +38,10 @@ from files import (
     child_directories,
     extract_archive,
     find_patcher_programs,
+    exe_inside,
     format_listing,
     installer_inside,
+    real_exe,
     remove_owned_directory,
     stage_media,
     stage_patcher_bundle,
@@ -62,6 +65,9 @@ from wine import (
     host_tool_environment,
     prefixed_environment,
     require_tools,
+    winetricks_arguments,
+    winetricks_on_path,
+    COMMON_WINETRICKS_VERBS,
 )
 from workers import FunctionWorker
 
@@ -99,6 +105,12 @@ class MainWindow(QMainWindow):
         self.protected_source: Path | None = None
         self.installer: Path | None = None
         self.game_dir: Path | None = None
+        self.exported_zip: Path | None = None
+        self.verify_game: Path | None = None
+        self.verify_prefix: Path | None = None
+        self._verify_verbs: tuple[str, ...] = ()
+        self._active_prefix: Path | None = None
+        self._stopped_prefix: Path | None = None
         self.source_path: Path | None = None
         self.media_root: Path | None = None
         self.fixes: list[Fix] = []
@@ -346,19 +358,31 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Manual adjustments")
         layout = QVBoxLayout(box)
         note = QLabel(
-            "Optional. After fixes, open the game folder or the Wine prefix and edit files yourself. "
-            "This step does not check what you change. Click Continue when you want to package the game folder."
+            "Optional. After fixes, open the game folder or the Wine prefix and edit files yourself, "
+            "or run an EXE in this prefix to see if the game starts. "
+            "This step does not check what you change or whether the game runs. "
+            "Click Continue when you want to package the game folder."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
         row = QHBoxLayout()
         self.open_game_btn = QPushButton("Open game folder")
         self.open_prefix_btn = QPushButton("Open Wine prefix")
+        self.run_exe_btn = QPushButton("Run EXE")
+        self.exe_done_btn = QPushButton("EXE finished")
         self.continue_btn = QPushButton("Continue")
         self.open_game_btn.clicked.connect(self.open_game_folder)
         self.open_prefix_btn.clicked.connect(self.open_wine_prefix)
+        self.run_exe_btn.clicked.connect(self.run_test_exe)
+        self.exe_done_btn.clicked.connect(self.test_exe_finished)
         self.continue_btn.clicked.connect(self.continue_to_export)
-        for button in (self.open_game_btn, self.open_prefix_btn, self.continue_btn):
+        for button in (
+            self.open_game_btn,
+            self.open_prefix_btn,
+            self.run_exe_btn,
+            self.exe_done_btn,
+            self.continue_btn,
+        ):
             row.addWidget(button)
         row.addStretch(1)
         layout.addLayout(row)
@@ -384,13 +408,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.filename_label)
         note = QLabel(
             "(W_P) is GameVault's Windows-portable type tag. "
-            "Creating the ZIP does not test whether the game runs."
+            "Creating the ZIP does not test whether the game runs. "
+            "Verify ZIP is optional: it unpacks that ZIP into a new Wine prefix and runs an EXE you choose. "
+            "The installation prefix is not reused."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        row = QHBoxLayout()
         self.export_btn = QPushButton("Create ZIP")
+        self.verify_btn = QPushButton("Verify ZIP")
+        self.winetricks_btn = QPushButton("Open winetricks")
+        self.verify_done_btn = QPushButton("Verify finished")
         self.export_btn.clicked.connect(self.export_zip)
-        layout.addWidget(self.export_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.verify_btn.clicked.connect(self.verify_zip)
+        self.winetricks_btn.clicked.connect(self.open_verify_winetricks)
+        self.verify_done_btn.clicked.connect(self.verify_finished)
+        for button in (self.export_btn, self.verify_btn, self.winetricks_btn, self.verify_done_btn):
+            row.addWidget(button)
+        row.addStretch(1)
+        layout.addLayout(row)
         self.title_edit.textEdited.connect(self._mark_title_custom)
         self.title_edit.textChanged.connect(self.refresh_name)
         self.version_edit.textChanged.connect(self.refresh_name)
@@ -474,6 +510,8 @@ class MainWindow(QMainWindow):
         )
         self.finished_btn.setEnabled(self.mode == "install-ui")
         self.patcher_done_btn.setEnabled(self.mode == "patcher-ui")
+        self.exe_done_btn.setEnabled(self.mode == "test-ui")
+        self.verify_done_btn.setEnabled(self.mode == "verify-ui")
         self.stop_btn.setEnabled(
             self.prefix_dir is not None and not self.wine_idle and not self._killing
         )
@@ -495,8 +533,15 @@ class MainWindow(QMainWindow):
         )
         self.open_game_btn.setEnabled(fixes_ready)
         self.open_prefix_btn.setEnabled(fixes_ready and self.prefix_dir is not None)
+        self.run_exe_btn.setEnabled(fixes_ready and self.prefix_dir is not None)
         self.continue_btn.setEnabled(fixes_ready)
         self.export_btn.setEnabled(fixes_ready and self.manual_continued and self._name_error == "")
+        self.verify_btn.setEnabled(
+            not locked and self.wine_idle and self.exported_zip is not None and self.workspace is not None
+        )
+        self.winetricks_btn.setEnabled(
+            not locked and self.wine_idle and self.verify_prefix is not None
+        )
 
     def _browse_dir(self, edit: QLineEdit, title: str) -> None:
         current = edit.text().strip() or str(Path.home())
@@ -631,12 +676,26 @@ class MainWindow(QMainWindow):
         self.set_status("Installer selected. Initialize the prefix and launch it when you are ready.")
         self.refresh_buttons()
 
-    def _wine_env(self) -> QProcessEnvironment:
-        qenv = self._qenv(prefixed_environment(self.prefix_dir))
-        qenv.insert("WINEPREFIX", str(self.prefix_dir))
+    def _wine_env(self, prefix: Path | None = None) -> QProcessEnvironment:
+        chosen = prefix if prefix is not None else self.prefix_dir
+        qenv = self._qenv(prefixed_environment(chosen))
+        qenv.insert("WINEPREFIX", str(chosen))
         return qenv
 
-    def _run_prefix_command(self, program: str, args: list[str], cwd: Path | None, on_done, mode: str) -> None:
+    def _run_prefix_command(
+        self,
+        program: str,
+        args: list[str],
+        cwd: Path | None,
+        on_done,
+        mode: str,
+        prefix: Path | None = None,
+    ) -> None:
+        chosen = prefix if prefix is not None else self.prefix_dir
+        if chosen is None:
+            self.show_error("There is no Wine prefix for this command.")
+            return
+        self._active_prefix = chosen
         try:
             require_tools()
         except WineError as exc:
@@ -661,7 +720,7 @@ class MainWindow(QMainWindow):
         proc = QProcess(self)
         proc.setProgram(program)
         proc.setArguments([str(arg) for arg in args])
-        proc.setProcessEnvironment(self._wine_env())
+        proc.setProcessEnvironment(self._wine_env(self._active_prefix))
         if cwd is not None:
             proc.setWorkingDirectory(str(cwd))
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -670,7 +729,7 @@ class MainWindow(QMainWindow):
         proc.finished.connect(self._process_finished)
         self.process = proc
         self.log("Starting " + program + " " + " ".join(str(arg) for arg in args))
-        self.log(f"WINEPREFIX={self.prefix_dir}")
+        self.log(f"WINEPREFIX={self._active_prefix}")
         proc.start()
 
     def _read_process(self) -> None:
@@ -775,12 +834,17 @@ class MainWindow(QMainWindow):
             return
         self._start_wine_wait("patcher")
 
-    def _start_wine_wait(self, kind: str) -> None:
+    def _start_wine_wait(self, kind: str, prefix: Path | None = None) -> None:
+        chosen = prefix if prefix is not None else self.prefix_dir
+        if chosen is None:
+            self.show_error("There is no Wine prefix to wait for.")
+            return
         try:
             require_tools()
         except WineError as exc:
             self.show_error(str(exc))
             return
+        self._active_prefix = chosen
         self._idle_kind = kind
         self.mode = "waiting-processes"
         self.busy = True
@@ -788,13 +852,13 @@ class MainWindow(QMainWindow):
         proc = QProcess(self)
         proc.setProgram("wineserver")
         proc.setArguments(["-w"])
-        proc.setProcessEnvironment(self._wine_env())
+        proc.setProcessEnvironment(self._wine_env(chosen))
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyReadStandardOutput.connect(lambda: self._read_extra(proc))
         proc.finished.connect(self._wait_finished)
         self.wait_process = proc
         self.log("Waiting for Wine processes in this prefix to exit (wineserver -w).")
-        self.log(f"WINEPREFIX={self.prefix_dir}")
+        self.log(f"WINEPREFIX={chosen}")
         proc.start()
 
     def _read_extra(self, proc: QProcess) -> None:
@@ -811,7 +875,7 @@ class MainWindow(QMainWindow):
             self.refresh_buttons()
             return
         if code != 0 or status != QProcess.ExitStatus.NormalExit:
-            self.mode = "install-ui" if self._idle_kind == "install" else "patcher-ui"
+            self.mode = self._resume_ui_mode()
             self.show_error(
                 f"wineserver -w exited with code {code}. "
                 "Stop this session's Wine processes if something is still running."
@@ -823,17 +887,35 @@ class MainWindow(QMainWindow):
         if self._idle_kind == "install":
             self.install_ready = True
             self.set_status("Wine is idle. Select the installed game folder.")
+        elif self._idle_kind == "test":
+            self.set_status("Wine is idle. You can edit the game folder or prefix, then click Continue.")
+        elif self._idle_kind == "verify":
+            self.set_status(
+                "Wine is idle. The ZIP was not changed. "
+                "A program starting does not mean the game is compatible."
+            )
         else:
             self._complete_current_fix()
         self.refresh_buttons()
 
+    def _resume_ui_mode(self) -> str:
+        if self._idle_kind == "install":
+            return "install-ui"
+        if self._idle_kind == "test":
+            return "test-ui"
+        if self._idle_kind == "verify":
+            return "verify-ui"
+        return "patcher-ui"
+
     def stop_wine(self) -> None:
-        if self.prefix_dir is None or self.wine_idle or self._killing:
+        target = self._active_prefix or self.prefix_dir
+        if target is None or self.wine_idle or self._killing:
             return
         answer = QMessageBox.question(
             self,
             "Stop Wine",
-            "Stop all Wine processes in this session's prefix?\n\nOther Wine prefixes are not affected.",
+            "Stop all Wine processes in the prefix that is running?\n\n"
+            f"{target}\n\nOther Wine prefixes are not affected.",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -843,18 +925,19 @@ class MainWindow(QMainWindow):
             self.show_error(str(exc))
             return
         self._stopped = True
+        self._stopped_prefix = target
         self._killing = True
         self.refresh_buttons()
         proc = QProcess(self)
         proc.setProgram("wineserver")
         proc.setArguments(["-k"])
-        proc.setProcessEnvironment(self._wine_env())
+        proc.setProcessEnvironment(self._wine_env(target))
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyReadStandardOutput.connect(lambda: self._read_extra(proc))
         proc.finished.connect(self._kill_finished)
         self.killer = proc
         self.log("Stopping Wine processes for this prefix (wineserver -k).")
-        self.log(f"WINEPREFIX={self.prefix_dir}")
+        self.log(f"WINEPREFIX={target}")
         proc.start()
 
     def _kill_finished(self, code: int, _status) -> None:
@@ -882,7 +965,11 @@ class MainWindow(QMainWindow):
                 "Wine processes for this prefix were stopped. The patcher may have changed the prefix. "
                 "Later fixes were not started. Earlier applied fixes remain."
             )
-        elif self.finish_requested and self.install_launched:
+        elif (
+            self.finish_requested
+            and self.install_launched
+            and self._stopped_prefix == self.prefix_dir
+        ):
             self.install_ready = True
             self.set_status(
                 "Wine processes for this prefix were stopped. Select the game folder if installation finished."
@@ -1490,6 +1577,51 @@ class MainWindow(QMainWindow):
         self.show_error(message)
         self.refresh_buttons()
 
+    def run_test_exe(self) -> None:
+        if self.game_dir is None or self.prefix_dir is None or not self.wine_idle:
+            return
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select an EXE to run",
+            str(self.game_dir),
+            "Windows executables (*.exe *.EXE);;All files (*)",
+        )
+        if not chosen:
+            return
+        try:
+            executable = real_exe(Path(chosen))
+        except FileError as exc:
+            self.show_error(str(exc))
+            return
+        self._stopped = False
+        self._stop_settled = False
+        self.set_status("Close the program when you are done testing, then click EXE finished.")
+        self._run_prefix_command(
+            "wine",
+            [str(executable)],
+            executable.parent,
+            self._test_exe_exited,
+            "test-ui",
+        )
+
+    def _test_exe_exited(self, code: int, _normal: bool) -> None:
+        self.log(f"The test program exited with code {code}.")
+        if self._stopped:
+            self._settle_after_stop()
+            return
+        if self.wine_idle or self._process_running(self.wait_process):
+            return
+        self.busy = False
+        self.mode = "test-ui"
+        self.wine_idle = False
+        self.set_status("Close the program when you are done testing, then click EXE finished.")
+        self.refresh_buttons()
+
+    def test_exe_finished(self) -> None:
+        if self.mode != "test-ui" or self.prefix_dir is None:
+            return
+        self._start_wine_wait("test")
+
     def open_game_folder(self) -> None:
         self._open_in_file_manager(self.game_dir, "game folder")
 
@@ -1578,15 +1710,206 @@ class MainWindow(QMainWindow):
             )
 
         def done(path: Path):
+            self.exported_zip = path
             self.progress.setValue(100)
-            self.set_status("Archive created. Gameplay compatibility has not been tested.")
+            self.set_status(
+                "Archive created. Gameplay compatibility has not been tested. "
+                "Verify ZIP is optional."
+            )
             QMessageBox.information(
                 self,
                 "Archive created",
-                "Archive created. Gameplay compatibility has not been tested.\n\n" + str(path),
+                "Archive created. Gameplay compatibility has not been tested.\n\n"
+                "Verify ZIP is optional. It unpacks this ZIP into a new Wine prefix "
+                "and runs an EXE you choose.\n\n" + str(path),
             )
 
         self._start_worker(work, done)
+
+    def verify_zip(self) -> None:
+        if self.exported_zip is None or self.workspace is None or not self.wine_idle or self.mode is not None:
+            return
+        dialog = VerifyDialog(winetricks_on_path(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._verify_verbs = dialog.verbs
+        archive = self.exported_zip
+        workspace = self.workspace
+        self.set_status(f"Unpacking {archive.name} for verification.")
+
+        def work(progress):
+            root = workspace / "verify"
+            if root.exists() or root.is_symlink():
+                remove_owned_directory(root, workspace)
+            game = root / "game"
+            prefix = root / "prefix"
+            game.mkdir(parents=True)
+            prefix.mkdir()
+            progress(5, "Unpacking the ZIP")
+            extract_archive(archive, game, kind="zip", progress=progress)
+            return game, prefix
+
+        self._start_worker(work, self._verify_unpacked)
+
+    def _verify_unpacked(self, result) -> None:
+        game, prefix = result
+        self.verify_game = game
+        self.verify_prefix = prefix
+        self._stopped = False
+        self._stop_settled = False
+        self.set_status("Creating a new Wine prefix for verification.")
+        self._run_prefix_command(
+            "wineboot",
+            ["-u"],
+            None,
+            self._verify_wineboot_finished,
+            "waiting-processes",
+            prefix=prefix,
+        )
+
+    def _verify_wineboot_finished(self, code: int, normal: bool) -> None:
+        if self._stopped:
+            self._settle_after_stop()
+            return
+        if code != 0 or not normal:
+            self.mode = None
+            self.busy = False
+            self.wine_idle = True
+            self.show_error(f"wineboot failed with exit code {code}. See the log for the Wine output.")
+            self.refresh_buttons()
+            return
+        if self._verify_verbs:
+            if not winetricks_on_path():
+                self.mode = None
+                self.busy = False
+                self.wine_idle = True
+                self.show_error(
+                    "winetricks is not on PATH. This app does not install it. "
+                    "Verify again without the library option, or install winetricks yourself."
+                )
+                self.refresh_buttons()
+                return
+            self.set_status(
+                "Installing libraries with winetricks. This downloads installers and can take a long time."
+            )
+            try:
+                args = winetricks_arguments(self._verify_verbs)
+            except WineError as exc:
+                self.mode = None
+                self.busy = False
+                self.wine_idle = True
+                self.show_error(str(exc))
+                self.refresh_buttons()
+                return
+            self._run_prefix_command(
+                "winetricks",
+                args,
+                None,
+                self._verify_winetricks_finished,
+                "waiting-processes",
+                prefix=self.verify_prefix,
+            )
+            return
+        self._pick_and_run_verify_exe()
+
+    def _verify_winetricks_finished(self, code: int, normal: bool) -> None:
+        if self._stopped:
+            self._settle_after_stop()
+            return
+        if code != 0 or not normal:
+            self.mode = None
+            self.busy = False
+            self.wine_idle = True
+            self.show_error(
+                f"winetricks failed with exit code {code}. "
+                "The verification prefix was left in place. Verify again to replace it."
+            )
+            self.refresh_buttons()
+            return
+        self._pick_and_run_verify_exe()
+
+    def open_verify_winetricks(self) -> None:
+        if self.verify_prefix is None or not self.wine_idle or self.mode is not None:
+            return
+        if not winetricks_on_path():
+            self.show_error("winetricks is not on PATH. This app does not install it.")
+            return
+        self._stopped = False
+        self._stop_settled = False
+        self.set_status("Close winetricks when you are done, then click Verify finished.")
+        self._run_prefix_command(
+            "winetricks",
+            [],
+            None,
+            self._verify_winetricks_gui_exited,
+            "verify-ui",
+            prefix=self.verify_prefix,
+        )
+
+    def _verify_winetricks_gui_exited(self, code: int, _normal: bool) -> None:
+        self.log(f"winetricks exited with code {code}.")
+        if self._stopped:
+            self._settle_after_stop()
+            return
+        if self.wine_idle or self._process_running(self.wait_process):
+            return
+        self.busy = False
+        self.mode = "verify-ui"
+        self.wine_idle = False
+        self.set_status("Close winetricks when you are done, then click Verify finished.")
+        self.refresh_buttons()
+
+    def _pick_and_run_verify_exe(self) -> None:
+        self.wine_idle = True
+        self.busy = False
+        self.mode = None
+        self.refresh_buttons()
+        if self.verify_game is None or self.verify_prefix is None:
+            self.show_error("The unpacked ZIP is missing.")
+            return
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select the game EXE to try",
+            str(self.verify_game),
+            "Windows executables (*.exe *.EXE);;All files (*)",
+        )
+        if not chosen:
+            self.set_status("Verification stopped before a program was started. The ZIP was not changed.")
+            return
+        try:
+            executable = exe_inside(self.verify_game, Path(chosen))
+        except FileError as exc:
+            self.show_error(str(exc))
+            return
+        self._stopped = False
+        self._stop_settled = False
+        self.set_status("Close the program when you are done, then click Verify finished.")
+        self._run_prefix_command(
+            "wine",
+            [str(executable)],
+            executable.parent,
+            self._verify_exited,
+            "verify-ui",
+            prefix=self.verify_prefix,
+        )
+
+    def _verify_exited(self, code: int, _normal: bool) -> None:
+        self.log(f"The verification program exited with code {code}.")
+        if self._stopped:
+            self._settle_after_stop()
+            return
+        if self.wine_idle or self._process_running(self.wait_process):
+            return
+        self.busy = False
+        self.mode = "verify-ui"
+        self.wine_idle = False
+        self.set_status("Close the program when you are done, then click Verify finished.")
+        self.refresh_buttons()
+
+    def verify_finished(self) -> None:
+        if self.mode != "verify-ui" or self.verify_prefix is None:
+            return
+        self._start_wine_wait("verify", self.verify_prefix)
 
     def _start_worker(self, fn, on_ok, cleanup: Path | None = None) -> None:
         self.busy = True
@@ -1815,4 +2138,49 @@ class PatcherDialog(QDialog):
 
     def _accept(self) -> None:
         self.place_in_game = self.game_radio.isChecked()
+        self.accept()
+
+
+class VerifyDialog(QDialog):
+    def __init__(self, winetricks_available: bool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Verify ZIP")
+        self.verbs: tuple[str, ...] = ()
+        layout = QVBoxLayout(self)
+        text = QLabel(
+            "This unpacks the ZIP you just created into the workspace and makes a new Wine prefix. "
+            "The prefix used for installation is left alone. You then choose the game EXE to try.\n\n"
+            "A program starting does not mean the game is compatible, and the ZIP is not changed."
+        )
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        names = ", ".join(COMMON_WINETRICKS_VERBS)
+        self.libraries = QCheckBox("Install the common libraries with winetricks")
+        self.libraries.setEnabled(winetricks_available)
+        layout.addWidget(self.libraries)
+        if winetricks_available:
+            detail = (
+                f"The common set is {names}. "
+                "Winetricks downloads those installers and can take a long time. "
+                "After this prefix exists, Open winetricks starts the winetricks menu for it "
+                "so you can add other libraries yourself. This app does not install winetricks."
+            )
+        else:
+            detail = (
+                "winetricks is not on PATH, so this step uses an empty prefix. "
+                "This app does not install winetricks."
+            )
+        note = QLabel(detail)
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Verify")
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        self.verbs = COMMON_WINETRICKS_VERBS if self.libraries.isChecked() else ()
         self.accept()

@@ -1035,6 +1035,28 @@ def stage_media(
         raise
 
 
+def real_exe(path: Path) -> Path:
+    """Return a real .exe file. Links are rejected."""
+    path = Path(path).expanduser()
+    if path.is_symlink():
+        raise FileError("Select a real .exe file, not a link.")
+    if not path.is_file():
+        raise FileError("Select a real .exe file.")
+    if path.suffix.lower() != ".exe":
+        raise FileError("Select a .exe file.")
+    return path.resolve()
+
+
+def exe_inside(root: Path, selected: Path) -> Path:
+    """Return a real .exe that lives inside root."""
+    chosen = real_exe(selected)
+    try:
+        chosen.relative_to(root.resolve())
+    except ValueError as exc:
+        raise FileError("Select an EXE inside the unpacked ZIP.") from exc
+    return chosen
+
+
 def installer_inside(media: Path, selected: Path) -> Path:
     media = media.resolve()
     selected = Path(selected).expanduser()

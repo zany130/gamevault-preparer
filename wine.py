@@ -7,6 +7,17 @@ import shutil
 from pathlib import Path
 
 REQUIRED_TOOLS = ("wine", "wineboot", "wineserver", "winepath")
+COMMON_WINETRICKS_VERBS = (
+    "d3dx9",
+    "d3dx10",
+    "d3dx11_43",
+    "d3dcompiler_43",
+    "d3dcompiler_47",
+    "xact",
+    "vcrun2008",
+    "vcrun2010",
+    "vcrun2019",
+)
 
 # Characters that stay dangerous inside a quoted cmd.exe command.
 _CMD_META = set('&|<>^%!"\r\n()')
@@ -18,6 +29,23 @@ class WineError(Exception):
 
 def missing_tools() -> list[str]:
     return [name for name in REQUIRED_TOOLS if shutil.which(name) is None]
+
+
+def winetricks_on_path() -> bool:
+    return shutil.which("winetricks") is not None
+
+
+def winetricks_arguments(verbs: tuple[str, ...]) -> list[str]:
+    """Arguments for one quiet winetricks run. The verb list is closed."""
+    if not verbs:
+        raise WineError("No libraries were selected.")
+    allowed = set(COMMON_WINETRICKS_VERBS)
+    unknown = [verb for verb in verbs if verb not in allowed]
+    if unknown:
+        raise WineError("Only the listed libraries can be installed: " + ", ".join(unknown))
+    if len(set(verbs)) != len(verbs):
+        raise WineError("A library was listed more than once.")
+    return ["-q", *verbs]
 
 
 def require_tools() -> None:

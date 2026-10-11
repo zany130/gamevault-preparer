@@ -13,6 +13,7 @@ Install these yourself. The app does not download packages or scan the system be
 - PySide6
 - libarchive, plus the `libarchive-c` Python package, for ISO9660 and 7z files
 - 7-Zip (`7zz` or `7z`) for UDF discs and for hybrid discs whose ISO9660 view is missing files. The AppImage includes 7-Zip. A source install needs the `7zip` package on `PATH`.
+- Optional: [winetricks](https://github.com/Winetricks/winetricks), if you want **Verify ZIP** to install `d3dx9`, `d3dx10`, `d3dx11_43`, `d3dcompiler_43`, `d3dcompiler_47`, `xact`, `vcrun2008`, `vcrun2010`, and `vcrun2019` into the verification prefix. **Open winetricks** starts the winetricks menu for that same prefix. The app does not install winetricks. Libraries are downloaded only when you ask for them, and winetricks does the download.
 
 ZIP files and ordinary copying use the Python standard library.
 
@@ -80,8 +81,8 @@ The file is written to `dist/`. The build uses the Python on your `PATH`, so a r
 2. Launch the installer in a new prefix. The installer's default location is fine. Finish the installer, uncheck Launch game if it is offered, then click **Installation finished**.
 3. Select the installed game folder inside that prefix's `drive_c`.
 4. Optionally add copy fixes or EXE/BAT patchers. A patcher can be copied into the game folder and run there, or run from its own folder. **Apply All Fixes** runs the enabled rows in order. New files are copied without another prompt. Overwrites wait for approval. Each patcher waits for a separate **Run** confirmation, then for **Patcher finished**. If a ZIP or 7z contains an EXE or BAT, you can copy the files only, or also run one of those programs from the game folder after the copy. Files copied into the game stay there; delete leftovers from Manual adjustments if they should not be in the ZIP.
-5. Optionally open the game folder or the Wine prefix in your file manager and edit files yourself. The app does not inspect those edits. Click **Continue** when you want to package the game folder. You can continue without opening either folder.
-6. Enter a title and, if you want, a version and a four-digit year. Create the ZIP.
+5. Optionally open the game folder or the Wine prefix in your file manager and edit files yourself, or click **Run EXE** to start a program in this prefix and see if the game starts. The app does not inspect those edits or whether the game runs. Close the program, click **EXE finished**, then click **Continue** when you want to package the game folder. You can continue without opening either folder or running a program.
+6. Enter a title and, if you want, a version and a four-digit year. Create the ZIP. Optionally click **Verify ZIP** to unpack that ZIP into a new Wine prefix, choose the game EXE, and try to start it. If winetricks is installed, you can install the common library set first, or click **Open winetricks** to use its menu on that prefix. Close the program and click **Verify finished**. The ZIP is not changed, and a window opening is not a compatibility promise.
 
 Closing the window asks you to **Keep workspace** or **Delete workspace**. Keep is the default. Delete removes only the workspace this session created, after Wine has stopped.
 
@@ -107,7 +108,7 @@ PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -v
 1. Stage an EXE that has a companion file. Confirm the original folder is unchanged and the workspace `media` folder has the same relative paths.
 2. Launch the installer and confirm the window still responds. The log's `WINEPREFIX` should be the workspace `prefix` folder, not `~/.wine`.
 3. After **Installation finished**, select the game directory. `drive_c`, `windows`, and `Program Files` should be rejected.
-4. Open the game folder and the Wine prefix from Manual adjustments, change a file if you want, and click **Continue**. The file list in the window should stay as it was. Then create a ZIP and confirm the archive contains the game files, including that edit, and not the prefix or the installer.
+4. Open the game folder and the Wine prefix from Manual adjustments, change a file if you want, and click **Continue**. The file list in the window should stay as it was. Then create a ZIP and confirm the archive contains the game files, including that edit, and not the prefix or the installer. Optionally run an EXE from Manual adjustments, close it, and click **EXE finished** before **Continue**.
 5. Repeat with an existing ZIP of the same name and confirm that file is unchanged.
 6. Stage an installer folder, then an ISO, and reach a ZIP from each.
 7. Add a copy fix that only adds files and confirm **Apply All Fixes** does not ask again. Add one that overwrites, decline it, and confirm older applied fixes are still there.
