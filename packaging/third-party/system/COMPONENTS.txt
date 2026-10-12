@@ -13,7 +13,7 @@
 libQt6*.so.6	PySide6/Qt 6.12.0	qt/LGPL-3.0.txt, qt/GPL-3.0.txt, qt/GPL-2.0.txt
 libpyside6.abi3.so.6.12	PySide6 6.12.0	qt/LGPL-3.0.txt, qt/GPL-3.0.txt, qt/GPL-2.0.txt
 libshiboken6.abi3.so.6.12	shiboken6 6.12.0	qt/LGPL-3.0.txt, qt/GPL-3.0.txt, qt/GPL-2.0.txt
-libicu*.so.73	ICU 73 bundled with the PySide6 6.12.0 Qt wheel	system/copyright/libicu74/copyright
+libicu*.so.73	ICU 73.2.0 bundled with the PySide6 6.12.0 Qt wheel	icu/LICENSE-73.2.txt
 libpython3.12.so.1.0	CPython 3.12.15 (actions/setup-python)	python/LICENSE.txt
 libX11-xcb.so.1	libx11-xcb1 2:1.8.7-1build1	system/copyright/libx11-xcb1/copyright
 libX11.so.6	libx11-6 2:1.8.7-1build1	system/copyright/libx11-6/copyright

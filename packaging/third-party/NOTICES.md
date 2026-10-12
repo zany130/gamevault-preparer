@@ -14,20 +14,29 @@ The copies in the image are unmodified shared libraries (`libQt6*.so.6`, `libpys
 
 Corresponding source for that version is published by the Qt Project:
 
-- https://pypi.org/project/PySide6/6.12.0/
-- https://pypi.org/project/shiboken6/6.12.0/
-- https://code.qt.io/cgit/pyside/pyside-setup.git/
-- https://download.qt.io/official_releases/qt/6.12/
+- https://download.qt.io/official_releases/qt/6.12/6.12.0/single/qt-everywhere-src-6.12.0.tar.xz
+- https://pypi.org/project/PySide6/6.12.0/#files
+- https://pypi.org/project/shiboken6/6.12.0/#files
+- https://code.qt.io/cgit/pyside/pyside-setup.git/tag/?h=v6.12.0
 
-To use a different build of a Qt library, extract the AppImage with `--appimage-extract` and replace the matching `libQt6*.so.6` under `usr/bin/gvprep/_internal/` and under `usr/bin/gvprep/_internal/PySide6/Qt/lib/`.
+## Replacing an LGPL library
 
-The image does not contain the Qt source tarball. The links above are the public source for 6.12.0.
+Qt, PySide6, shiboken6, 7-Zip, and the other LGPL libraries in the image are separate shared objects, not copied into the executable. Extract the AppImage with `--appimage-extract`. The files are under `squashfs-root/usr/bin/gvprep/_internal/`. Qt also has a copy under `squashfs-root/usr/bin/gvprep/_internal/PySide6/Qt/lib/`. Replace a library with an interface-compatible build, then run `squashfs-root/AppRun`. The image is not signed, and running the extracted copy does not require a key.
+
+On a dpkg build, `system/COMPONENTS.txt` records each system library's binary package, its copyright file, and the Ubuntu source package version with a Launchpad page for that version. That page is the corresponding source for the binary that was copied. The image does not contain those source archives.
 
 ## ICU
 
-The Qt wheel ships its own ICU 73 libraries: `libicudata.so.73`, `libicui18n.so.73`, and `libicuuc.so.73`. They are not Debian packages, and the wheel does not include an ICU license file. The Unicode, Inc. license for ICU is the MIT text under `Files: *` in `system/copyright/libicu74/copyright`.
+The Qt 6.12.0 wheel bundles ICU 73.2. `u_getVersion` on `libicuuc.so.73` returns 73.2.0.0. The libraries are `libicudata.so.73`, `libicui18n.so.73`, and `libicuuc.so.73`, including the copy under `PySide6/Qt/lib/`. They are not Debian packages. The wheel does not include a license file. The data library carries Unicode's copyright notice and points at https://www.unicode.org/copyright.html.
 
-The Ubuntu image also bundles the system ICU 74 libraries `libicudata.so.74` and `libicuuc.so.74` from `libicu74` 74.2-1ubuntu3.1. That same copyright file is their notice. Its `debian/*` section is GPL-3 and covers Debian packaging files, which are not the shared libraries.
+The license that applies to this ICU 73.2 copy is `icu/LICENSE-73.2.txt`, the `icu4c/LICENSE` file from the ICU 73.2 release. It is the Unicode, Inc. License Agreement - Data Files and Software, copyright 1991-2023 Unicode, Inc., followed by the third-party notices in that file. The Debian MIT wording in the ICU 74 copyright is a different text and is not this notice.
+
+Source for this version:
+
+- https://github.com/unicode-org/icu/releases/tag/release-73-2
+- https://github.com/unicode-org/icu/releases/download/release-73-2/icu4c-73_2-src.tgz
+
+The Ubuntu build also bundles the system ICU 74 libraries `libicudata.so.74` and `libicuuc.so.74` from `libicu74`. Their notice is `system/copyright/libicu74/copyright`. Its `Files: *` section is the Debian MIT wording for ICU 74. Its `debian/*` section is GPL-3 and covers Debian packaging files, which are not the shared libraries. ICU 74's corresponding source is the Ubuntu source package named for `libicu74` in `system/COMPONENTS.txt`.
 
 ## 7-Zip
 
@@ -37,7 +46,7 @@ The Ubuntu image is built with the `7zip` package, version 23.01+dfsg-11 in the 
 
 Ubuntu's `/usr/bin/7z` is a shell script that executes `/usr/lib/7zip/7z`. The published 1.0.0 image copied that script, so it does not contain the 7-Zip executable. The AppImage build follows the wrapper and copies the ELF, still named `7z` or `7zz`, and stops if the bundled file is still a script.
 
-Corresponding source for the Ubuntu binary is the `7zip` source package with the RAR files removed (`https://www.7-zip.org/` and the Ubuntu `7zip` source package named in the copyright file). The image does not contain that source archive.
+Corresponding source for the Ubuntu binary is the Ubuntu `7zip` source package for the version named in `system/COMPONENTS.txt`. For the audited package that page is https://launchpad.net/ubuntu/+source/7zip/23.01+dfsg-11. That source excludes the RAR code. The image does not contain that source archive.
 
 ## libarchive
 
@@ -47,7 +56,7 @@ Corresponding source for the Ubuntu binary is the `7zip` source package with the
 
 ## Python
 
-`libpython3.12.so.1.0` in the audited image is CPython 3.12.15 from GitHub Actions `actions/setup-python` (`/opt/hostedtoolcache/Python/3.12.15/x64`). It is not Ubuntu's `libpython3.12t64` package. The Python Software Foundation license is `python/LICENSE.txt`. The build replaces that file in the image with `LICENSE.txt` from the CPython prefix it froze.
+`libpython3.12.so.1.0` in the published 1.0.0 image is CPython 3.12.15 from GitHub Actions `actions/setup-python` (`/opt/hostedtoolcache/Python/3.12.15/x64`). It is not Ubuntu's `libpython3.12t64` package. The Python Software Foundation license is `python/LICENSE.txt`. The build replaces that file in the image with `LICENSE.txt` from the CPython prefix it froze. When that library instead comes from an Ubuntu package, its row in `system/COMPONENTS.txt` points at the Debian copyright and the Ubuntu source package.
 
 ## PyInstaller
 
@@ -72,8 +81,6 @@ Every other system library in the image is mapped the same way. Debian copyright
 
 ## What this audit does not settle
 
-- The Qt and 7-Zip source offers above are links to public source. The image does not include those source archives, and this has not been reviewed by counsel.
+- The source locations above are public archives for the named versions. The image does not include those source archives. Nothing here is a legal opinion, and counsel has not reviewed this distribution.
 - The GTK copyright file lists extra per-file licenses, including GPL-3+ for a Debian test script. This audit did not prove that `libgtk-3.so.0` contains none of the GPL-only source files named there.
-- ICU 73 is identified as the copy shipped inside the Qt 6.12.0 wheel. The wheel does not name an ICU source tarball, so the Unicode license text is taken from the ICU 74 Debian copyright rather than from a file inside the wheel.
-- Package patch versions on a later GitHub-hosted runner can differ from the noble-updates debs used for `system/copyright/`. The dpkg collection during the build is the notice for that image. The published 1.0.0 image is unchanged and does not contain this notice directory.
-- No statement in this file is a legal opinion.
+- The dpkg collection during a build records the package versions on that machine. Those versions can differ from the noble-updates debs used for the checked-in `system/copyright/` snapshot. The published 1.0.0 image is unchanged and does not contain this notice directory.

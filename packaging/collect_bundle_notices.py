@@ -17,11 +17,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 ELF_MAGIC = b"\x7fELF"
 QT_LICENSE = "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
 QT_NOTICE = "qt/LGPL-3.0.txt, qt/GPL-3.0.txt, qt/GPL-2.0.txt"
-ICU73_NOTICE = "system/copyright/libicu74/copyright"
+ICU73_NOTICE = "icu/LICENSE-73.2.txt"
 PYTHON_NOTICE = "python/LICENSE.txt"
 PYINSTALLER_NOTICE = "pyinstaller/COPYING.txt"
 
@@ -109,7 +110,7 @@ def notice_for_private_file(bundled: Path, origin: Path) -> tuple[str, str]:
     name = bundled.name
     parts = set(bundled.parts) | set(origin.parts)
     if name.startswith("libicu") and ".so.73" in name:
-        return (f"ICU 73 bundled with Qt ({origin})", ICU73_NOTICE)
+        return (f"ICU 73.2 bundled with Qt ({origin})", ICU73_NOTICE)
     if (
         name.startswith(("libQt6", "libpyside6", "libshiboken6"))
         or "PySide6" in parts
@@ -149,6 +150,28 @@ def copyright_file(package: str) -> Path:
     raise NoticeError(
         f"No copyright file for {package}. Expected /usr/share/doc/{package}/copyright."
     )
+
+
+def launchpad_source_url(source_package: str, source_version: str) -> str:
+    """Ubuntu source page for one source package version."""
+    package = quote(source_package, safe="+")
+    version = quote(source_version, safe="+:~")
+    return f"https://launchpad.net/ubuntu/+source/{package}/{version}"
+
+
+def ubuntu_source(package: str) -> str:
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f", "${source:Package}\t${source:Version}", package],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or "\t" not in result.stdout:
+        raise NoticeError(f"No Ubuntu source package for {package}. {result.stderr.strip()}")
+    source_package, source_version = result.stdout.strip().split("\t", 1)
+    if not source_package or not source_version:
+        raise NoticeError(f"No Ubuntu source package for {package}.")
+    return f"{source_package} {source_version} {launchpad_source_url(source_package, source_version)}"
 
 
 def package_version(package: str) -> str:
@@ -302,6 +325,7 @@ def collect_notices(
     common_licenses: Path | None = None,
     private_roots: list[Path] | None = None,
     python_prefix: Path | None = None,
+    source_of=lambda package: "",
 ) -> list[tuple[str, str, str]]:
     """Return rows of (relative path, package, notice) and copy system copyrights."""
     seven = require_7zip_elf(internal)
@@ -341,6 +365,9 @@ def collect_notices(
         label = f"{package} {version}".strip()
         if notice_package != package:
             label = f"{label} (copyright in {notice_package})"
+        source_label = source_of(package)
+        if source_label:
+            label = f"{label}; source {source_label}"
         rows.append((str(bundled.relative_to(internal)), label, f"system/copyright/{notice_package}/copyright"))
 
     for bundled in iter_elfs(internal):
@@ -351,6 +378,16 @@ def collect_notices(
             add_system(bundled, Path(hinted) if hinted else bundled)
             continue
         origin = matching_origin(bundled, origins, indexed, system_library)
+        if origin is not None and use_dpkg:
+            try:
+                owner_of(origin)
+            except NoticeError:
+                owned = False
+            else:
+                owned = True
+            if owned:
+                add_system(bundled, origin)
+                continue
         if origin is not None and (
             any(_under(origin, root) for root in private)
             or is_interpreter_file(origin, python_prefix)
@@ -424,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         use_dpkg=use_dpkg,
         private_roots=[site],
         python_prefix=args.python_prefix,
+        source_of=ubuntu_source if use_dpkg else (lambda package: ""),
     )
     if use_dpkg:
         note = (

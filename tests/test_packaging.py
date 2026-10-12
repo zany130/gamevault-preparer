@@ -55,6 +55,20 @@ class NoticeTests(unittest.TestCase):
         self.assertIn("6.12.0", (notices / "qt" / "VERSION").read_text(encoding="utf-8"))
         self.assertIn("23.01+dfsg-11", text)
         self.assertIn("does not apply to the binary", text)
+        self.assertIn("icu/LICENSE-73.2.txt", text)
+        self.assertIn("73.2", text)
+        self.assertIn("libicu74", text)
+        icu_license = (notices / "icu" / "LICENSE-73.2.txt").read_text(encoding="utf-8")
+        self.assertIn("UNICODE, INC. LICENSE AGREEMENT - DATA FILES AND SOFTWARE", icu_license)
+        self.assertIn("Copyright © 1991-2023 Unicode, Inc.", icu_license)
+        self.assertEqual(
+            notices_module().launchpad_source_url("7zip", "23.01+dfsg-11"),
+            "https://launchpad.net/ubuntu/+source/7zip/23.01+dfsg-11",
+        )
+        self.assertEqual(
+            notices_module().launchpad_source_url("zlib", "1:1.3.dfsg-3.1ubuntu2.2"),
+            "https://launchpad.net/ubuntu/+source/zlib/1:1.3.dfsg-3.1ubuntu2.2",
+        )
         self.assertNotIn("its RAR unpacker adds the unRAR restriction", text)
         for package in (
             "libgtk-3-0t64",
@@ -128,13 +142,19 @@ class NoticeTests(unittest.TestCase):
                 "7zip": seven_notice,
                 "libstdc++6": gcc_notice,
             }
+            def owner(path):
+                try:
+                    return owners[str(path)]
+                except KeyError as exc:
+                    raise notices.NoticeError(str(path)) from exc
+
             rows = notices.collect_notices(
                 internal,
                 tree,
                 {"7z": str(seven_src), "libgtk-3.so.0": str(gtk_src), "libstdc++.so.6": str(std_src)},
                 [root / "venv"],
                 use_dpkg=True,
-                owner_of=lambda path: owners[str(path)],
+                owner_of=owner,
                 copyright_of=lambda package: copyrights[package],
                 version_of=lambda package: "tested",
                 system_library=lambda name: None,
